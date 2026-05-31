@@ -19,7 +19,7 @@ use axum::body::Body;
 use axum::extract::State;
 use axum::http::{header, HeaderValue, StatusCode};
 use axum::response::Response as AxumResponse;
-use axum::routing::{get, post};
+use axum::routing::post;
 use axum::{Json, Router};
 use futures::stream::StreamExt;
 use serde_json::{json, Value};
@@ -28,7 +28,7 @@ use tokio_stream::wrappers::BroadcastStream;
 
 use crate::plugin::BowirePlugin;
 use crate::runtime::dispatch::{dispatch, DispatchResult};
-use crate::runtime::jsonrpc::{Notification, Request, Response};
+use crate::runtime::jsonrpc::{Notification, Request};
 
 /// Channel capacity for server-initiated notifications. Bounded so a
 /// slow / disconnected SSE client can't grow memory without limit;
