@@ -148,7 +148,8 @@ async fn dispatch<P: BowirePlugin>(
             // Ack the request immediately — the host expects the
             // response *before* the first $/stream/data notification
             // so its subscription is live when frames start arriving.
-            let _ = write_response(&stdout, Response::ok(id, json!({ "streamId": stream_id }))).await;
+            let _ =
+                write_response(&stdout, Response::ok(id, json!({ "streamId": stream_id }))).await;
 
             // Pump the stream on this same task (we're inside a
             // tokio::spawn already, so we don't block the read loop).
