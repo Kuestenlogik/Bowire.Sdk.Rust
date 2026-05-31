@@ -30,14 +30,17 @@ jobs:
             target
           key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.toml') }}
 
-      - name: Check
+      - name: Check (default features — stdio only)
         run: cargo check --all-targets
 
+      - name: Check (--features http)
+        run: cargo check --all-targets --features http
+
       - name: Tests
-        run: cargo test
+        run: cargo test --all-features
 
       - name: Clippy
-        run: cargo clippy --all-targets -- -D warnings
+        run: cargo clippy --all-targets --all-features -- -D warnings
 
       - name: Format
         run: cargo fmt --all -- --check
