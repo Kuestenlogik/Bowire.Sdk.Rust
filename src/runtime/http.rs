@@ -75,11 +75,12 @@ pub async fn run_http<P: BowirePlugin>(
         .route("/", post(post_rpc).get(sse_subscribe))
         .with_state(state);
 
-    let addr: SocketAddr = format!("{host}:{port}")
-        .parse()
-        .map_err(|e: std::net::AddrParseError| {
-            std::io::Error::new(std::io::ErrorKind::InvalidInput, e)
-        })?;
+    let addr: SocketAddr =
+        format!("{host}:{port}")
+            .parse()
+            .map_err(|e: std::net::AddrParseError| {
+                std::io::Error::new(std::io::ErrorKind::InvalidInput, e)
+            })?;
 
     let listener = tokio::net::TcpListener::bind(addr).await?;
     axum::serve(listener, app)
@@ -166,9 +167,7 @@ async fn post_rpc<P: BowirePlugin>(
 /// `GET /` — Server-Sent-Events subscription. The workbench keeps
 /// one of these open per session; every server-initiated
 /// notification gets serialised as `data: <json>\n\n`.
-async fn sse_subscribe<P: BowirePlugin>(
-    State(state): State<HttpState<P>>,
-) -> AxumResponse {
+async fn sse_subscribe<P: BowirePlugin>(State(state): State<HttpState<P>>) -> AxumResponse {
     let rx = state.notifications.subscribe();
     let body_stream = BroadcastStream::new(rx).filter_map(|item| async move {
         let n = item.ok()?;
@@ -178,8 +177,10 @@ async fn sse_subscribe<P: BowirePlugin>(
     let body = Body::from_stream(body_stream);
 
     let mut resp = AxumResponse::new(body);
-    resp.headers_mut()
-        .insert(header::CONTENT_TYPE, HeaderValue::from_static("text/event-stream"));
+    resp.headers_mut().insert(
+        header::CONTENT_TYPE,
+        HeaderValue::from_static("text/event-stream"),
+    );
     resp.headers_mut()
         .insert(header::CACHE_CONTROL, HeaderValue::from_static("no-cache"));
     resp.headers_mut()
