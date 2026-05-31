@@ -2,9 +2,7 @@
 //! camelCase serialisation matches what the Bowire host expects on
 //! the wire (cross-checked against the Python SDK's emitted shape).
 
-use bowire_plugin::{
-    FieldInfo, InvokeResult, MessageInfo, MethodInfo, MethodType, ServiceInfo,
-};
+use bowire_plugin::{FieldInfo, InvokeResult, MessageInfo, MethodInfo, MethodType, ServiceInfo};
 
 #[test]
 fn service_info_serialises_camel_case_with_method_array() {

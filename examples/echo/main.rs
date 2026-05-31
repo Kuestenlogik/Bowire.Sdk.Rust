@@ -34,19 +34,20 @@ impl BowirePlugin for Echo {
     }
 
     async fn discover(&self, _server_url: &str, _show_internal: bool) -> Vec<ServiceInfo> {
-        let request = MessageInfo::new("EchoRequest", "echo.EchoRequest")
-            .with_fields([FieldInfo::string("message")
-                .with_description("Anything you want echoed back.")
-                .required()]);
+        let message_field = FieldInfo::string("message")
+            .with_description("Anything you want echoed back.")
+            .required();
+        let request =
+            MessageInfo::new("EchoRequest", "echo.EchoRequest").with_fields([message_field]);
         let reply = MessageInfo::new("EchoReply", "echo.EchoReply")
             .with_fields([FieldInfo::string("echoed")]);
 
-        vec![
-            ServiceInfo::new("DemoService").with_methods([MethodInfo::unary("Echo")
-                .with_input(request)
-                .with_output(reply)
-                .with_summary("Echo the request payload back.")]),
-        ]
+        let echo = MethodInfo::unary("Echo")
+            .with_input(request)
+            .with_output(reply)
+            .with_summary("Echo the request payload back.");
+
+        vec![ServiceInfo::new("DemoService").with_methods([echo])]
     }
 
     async fn invoke(
