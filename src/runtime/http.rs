@@ -58,11 +58,7 @@ const NOTIFICATION_CHANNEL_CAPACITY: usize = 1024;
 ///     run_http(Echo, "127.0.0.1", 8770).await
 /// }
 /// ```
-pub async fn run_http<P: BowirePlugin>(
-    plugin: P,
-    host: &str,
-    port: u16,
-) -> std::io::Result<()> {
+pub async fn run_http<P: BowirePlugin>(plugin: P, host: &str, port: u16) -> std::io::Result<()> {
     let plugin = Arc::new(plugin);
     let (notification_tx, _) = broadcast::channel::<Notification>(NOTIFICATION_CHANNEL_CAPACITY);
 

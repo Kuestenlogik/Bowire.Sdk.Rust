@@ -38,10 +38,7 @@ pub(crate) enum DispatchResult {
 /// Dispatch a single JSON-RPC request against `plugin`. Pure async
 /// function: no IO, no spawning, no stdout writes. The runtime
 /// handles every transport effect.
-pub(crate) async fn dispatch<P: BowirePlugin>(
-    plugin: Arc<P>,
-    req: Request,
-) -> DispatchResult {
+pub(crate) async fn dispatch<P: BowirePlugin>(plugin: Arc<P>, req: Request) -> DispatchResult {
     let id = req.id.unwrap_or(Value::Null);
     let params = req.params.unwrap_or_else(|| json!({}));
 
