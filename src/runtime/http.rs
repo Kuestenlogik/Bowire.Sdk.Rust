@@ -93,10 +93,22 @@ async fn shutdown_signal() {
     let _ = tokio::signal::ctrl_c().await;
 }
 
-#[derive(Clone)]
 struct HttpState<P: BowirePlugin> {
     plugin: Arc<P>,
     notifications: broadcast::Sender<Notification>,
+}
+
+// Manual `Clone` impl — `#[derive(Clone)]` would add an unwanted
+// `P: Clone` bound. `Arc<P>` is always `Clone` regardless of `P`,
+// and `broadcast::Sender` is `Clone`, so this struct clones cheaply
+// without forcing plugin types to be `Clone`.
+impl<P: BowirePlugin> Clone for HttpState<P> {
+    fn clone(&self) -> Self {
+        Self {
+            plugin: self.plugin.clone(),
+            notifications: self.notifications.clone(),
+        }
+    }
 }
 
 /// `POST /` — JSON-RPC request handler. Decodes the envelope, runs

@@ -29,7 +29,9 @@ pub(crate) struct Response {
 
 /// Outbound JSON-RPC server-initiated notification. Streaming
 /// frames + channel data flow this way (no `id`, no expected reply).
-#[derive(Debug, Serialize)]
+/// `Clone` so the HTTP runtime can fan-out via `tokio::sync::broadcast`
+/// (each subscriber receives its own clone of the envelope).
+#[derive(Debug, Clone, Serialize)]
 pub(crate) struct Notification {
     pub jsonrpc: &'static str,
     pub method: String,
