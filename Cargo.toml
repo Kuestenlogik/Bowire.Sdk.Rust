@@ -13,9 +13,11 @@ categories = ["api-bindings", "development-tools"]
 readme = "README.md"
 
 [features]
-# Default: stdio runtime only. The HTTP/SSE runtime lands in a
-# follow-up release — same contract surface, different transport.
+# Default: stdio runtime only. Opt into the HTTP/SSE variant when
+# you want a hosted / multi-tenant sidecar that doesn't run as the
+# host's subprocess.
 default = []
+http = ["dep:axum", "dep:tokio-stream"]
 
 [dependencies]
 async-trait = "0.1"
@@ -25,9 +27,12 @@ serde_json = "1"
 thiserror = "1"
 
 # tokio drives the async loop: the plugin trait is async, so we
-# need an executor regardless. Minimum features the stdio runtime
-# needs.
-tokio = { version = "1", features = ["rt-multi-thread", "macros", "sync", "io-std", "io-util"] }
+# need an executor regardless. Features list covers both runtimes.
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "sync", "io-std", "io-util", "net", "signal"] }
+
+# HTTP/SSE-mode dependencies — only pulled in by the `http` feature.
+axum = { version = "0.7", default-features = false, features = ["http1", "json", "tokio"], optional = true }
+tokio-stream = { version = "0.1", features = ["sync"], optional = true }
 
 [dev-dependencies]
 tokio = { version = "1", features = ["full", "test-util"] }

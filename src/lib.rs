@@ -71,3 +71,6 @@ pub use models::{
 };
 pub use plugin::BowirePlugin;
 pub use runtime::stdio::run;
+
+#[cfg(feature = "http")]
+pub use runtime::http::run_http;

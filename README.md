@@ -86,7 +86,19 @@ The host extracts into `~/.bowire/plugins/<packageId>/`, reads `sidecar.json`, a
 | stdio (default) | always on | `run(plugin)` |
 | HTTP / SSE      | `http`     | `run_http(plugin, host, port)` |
 
-stdio is what the host spawns as a subprocess (cheap, no extra deps). HTTP/SSE fits hosted / multi-tenant deployments where one sidecar serves many workbenches — POST sends a JSON-RPC request, a long-lived SSE GET drains server-initiated notifications.
+stdio is what the host spawns as a subprocess (cheap, no extra deps). HTTP/SSE fits hosted / multi-tenant deployments where one sidecar serves many workbenches — `POST /` lands JSON-RPC requests, `GET /` is a long-lived SSE stream the runtime pushes server notifications onto. Both runtimes share the same JSON-RPC dispatcher, so plugin code never knows which wire it's running over.
+
+```rust
+// HTTP/SSE mode — cargo add bowire-plugin --features http
+use bowire_plugin::run_http;
+
+#[tokio::main]
+async fn main() -> std::io::Result<()> {
+    run_http(MyPlugin::default(), "127.0.0.1", 8770).await
+}
+```
+
+Then point `sidecar.json` at `"transport": "http"` + `"url": "http://127.0.0.1:8770"` and the Bowire host bridges it the same way it bridges stdio sidecars.
 
 ## Trait surface
 
