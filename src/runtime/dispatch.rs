@@ -223,7 +223,10 @@ mod tests {
     async fn initialize_advertises_contract_version_and_capabilities() {
         let result = result_of(dispatch(Arc::new(Fake), request("initialize")).await);
 
-        assert_eq!(result["protocolVersion"], json!(crate::SIDECAR_PROTOCOL_VERSION));
+        assert_eq!(
+            result["protocolVersion"],
+            json!(crate::SIDECAR_PROTOCOL_VERSION)
+        );
         assert_eq!(
             result["capabilities"],
             json!({
