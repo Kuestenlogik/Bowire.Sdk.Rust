@@ -1,0 +1,38 @@
+version: 2
+
+# cargo + the workflow pins.
+#
+# No Cargo.lock is committed (this is a library), so cargo resolves fresh on
+# every build and a semver-compatible break reaches CI without a PR to point
+# at. Dependabot's value here is the visible record of which version moved,
+# and the axum/tokio-stream pair behind the `http` feature moving together.
+
+updates:
+  - package-ecosystem: "cargo"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+      day: "sunday"
+    open-pull-requests-limit: 5
+    labels:
+      - "dependencies"
+    commit-message:
+      prefix: "chore(deps)"
+      include: "scope"
+    groups:
+      http-feature:
+        patterns:
+          - "axum"
+          - "tokio-stream"
+
+  - package-ecosystem: "github-actions"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+      day: "sunday"
+    open-pull-requests-limit: 3
+    labels:
+      - "dependencies"
+      - "github-actions"
+    commit-message:
+      prefix: "chore(actions)"
