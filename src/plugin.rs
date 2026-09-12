@@ -8,6 +8,7 @@ use std::collections::HashMap;
 
 use async_trait::async_trait;
 use futures::stream::{self, BoxStream};
+use serde::{Deserialize, Serialize};
 
 use crate::models::{InvokeResult, PluginSetting, ServiceInfo};
 
@@ -90,5 +91,55 @@ pub trait BowirePlugin: Send + Sync + 'static {
     /// settings dialog. Default: no settings.
     fn settings(&self) -> Vec<PluginSetting> {
         Vec::new()
+    }
+
+    /// What this plugin can actually answer, reported in the
+    /// `initialize` handshake (#416). The host skips a call whose flag
+    /// is `false` — `channels: false` short-circuits `openChannel`
+    /// without a round-trip.
+    ///
+    /// The default says yes to discover and invoke (both are required
+    /// trait methods, so an implementation exists by definition) and to
+    /// `invoke_stream`, whose default emits one not-implemented frame
+    /// the workbench renders as an error. It says **no** to channels:
+    /// this runtime has no `openChannel` route at all, so claiming the
+    /// capability would earn a method-not-found for every duplex method
+    /// an operator opens.
+    ///
+    /// Override it when your plugin knows better — a plugin that does
+    /// not stream should say `invoke_stream: false` rather than hand the
+    /// operator an error frame.
+    fn capabilities(&self) -> Capabilities {
+        Capabilities::default()
+    }
+}
+
+/// Capability flags a sidecar advertises in its `initialize` reply
+/// (#416). Every flag defaults to `true` on the host when the object is
+/// absent, so an omitted capability is read as "can do" — which is why
+/// `channels` has to be reported explicitly while this runtime has no
+/// route for it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct Capabilities {
+    /// Can answer `discover`.
+    pub discover: bool,
+    /// Can answer `invoke`.
+    pub invoke: bool,
+    /// Can answer `invokeStream`.
+    pub invoke_stream: bool,
+    /// Can answer `openChannel` — always `false` for now, see
+    /// [`BowirePlugin::capabilities`].
+    pub channels: bool,
+}
+
+impl Default for Capabilities {
+    fn default() -> Self {
+        Self {
+            discover: true,
+            invoke: true,
+            invoke_stream: true,
+            channels: false,
+        }
     }
 }
