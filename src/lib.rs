@@ -69,7 +69,12 @@ pub use error::{Error, Result};
 pub use models::{
     FieldInfo, InvokeResult, MessageInfo, MethodInfo, MethodType, PluginSetting, ServiceInfo,
 };
-pub use plugin::BowirePlugin;
+pub use plugin::{BowirePlugin, Capabilities};
+
+/// The sidecar wire-contract version this SDK speaks (#416). The host
+/// accepts a sidecar inside its supported range and refuses one outside it
+/// at the handshake, rather than failing at the first call.
+pub const SIDECAR_PROTOCOL_VERSION: u32 = 1;
 pub use runtime::stdio::run;
 
 #[cfg(feature = "http")]
