@@ -57,3 +57,49 @@ jobs:
           echo "$out"
           echo "$out" | grep -q '"id":"echo-rs"'
           echo "$out" | grep -q '"protocolVersion":1'
+
+  # Against the real host, not a test double. The two wire shapes this SDK got
+  # wrong — a discover reply the host reads as "no services", a ping reply it
+  # reads as malformed — were invisible to a suite that only ever talked to
+  # itself. This job does what an operator does: install the published Bowire
+  # CLI, install the example as a sidecar plugin, ask it to discover.
+  # `bowire discover` exits 0 only when a plugin actually returned a service,
+  # so the exit code is the assertion.
+  e2e:
+    name: e2e against Bowire
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install stable toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: "10.0.x"
+
+      - name: Install the Bowire CLI
+        run: dotnet tool install --global Kuestenlogik.Bowire.Tool
+
+      # The zip's root carries sidecar.json next to the binary its
+      # `executable` names — that is what marks the archive as a sidecar
+      # plugin and what the host spawns.
+      - name: Package the example as a sidecar zip
+        run: |
+          cargo build --release --example echo
+          mkdir -p stage
+          cp target/release/examples/echo stage/echo
+          cp examples/echo/sidecar.json stage/
+          cd stage && zip -r ../echo-rs.zip . && cd ..
+          unzip -l echo-rs.zip
+
+      - name: Install it as a plugin
+        run: |
+          bowire --plugin-dir "$PWD/plugins" plugin install --file echo-rs.zip
+          bowire --plugin-dir "$PWD/plugins" plugin list --verbose
+
+      - name: Discover through the real host
+        run: |
+          out=$(bowire --plugin-dir "$PWD/plugins" discover --url "echo-rs@http://localhost:1")
+          echo "$out"
+          echo "$out" | grep -q "DemoService"
