@@ -45,7 +45,10 @@ jobs:
       - name: Format
         run: cargo fmt --all -- --check
 
-      # `cargo check --all-targets` compiles the example; this runs it. The
+      # `cargo check --all-targets` type-checks the example; this runs the real
+      # binary. Not via `cargo run`: piping one line into it produced an empty
+      # stdout in CI while the same binary answers correctly when spawned
+      # directly — which is how the host spawns it anyway. The
       # assertion is the handshake (#416) rather than just the id, because a
       # reply without protocolVersion is what made the host treat every
       # plugin built with this SDK as a legacy v1 sidecar — and nothing in
@@ -53,7 +56,8 @@ jobs:
       - name: Example smoke test
         run: |
           request='{"jsonrpc":"2.0","id":1,"method":"initialize","params":{}}'
-          out=$(echo "$request" | cargo run --quiet --example echo)
+          cargo build --release --example echo
+          out=$(echo "$request" | ./target/release/examples/echo)
           echo "$out"
           echo "$out" | grep -q '"id":"echo-rs"'
           echo "$out" | grep -q '"protocolVersion":1'
