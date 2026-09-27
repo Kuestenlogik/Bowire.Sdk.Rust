@@ -24,7 +24,7 @@ async-trait = "0.1"
 futures = "0.3"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
-thiserror = "1"
+thiserror = "2"
 
 # tokio drives the async loop: the plugin trait is async, so we
 # need an executor regardless. Features list covers both runtimes.
