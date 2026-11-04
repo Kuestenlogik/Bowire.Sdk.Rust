@@ -46,7 +46,43 @@ async fn main() {
 }
 ```
 
-That's it. The SDK drives the JSON-RPC contract (`initialize` / `ping` / `discover` / `invoke` / `invokeStream` / `shutdown`) over NDJSON on stdin/stdout. The Bowire host spawns your binary as a subprocess; your plugin code never touches the wire.
+That's it. The SDK drives the JSON-RPC contract (`initialize` / `ping` / `discover` / `invoke` / `invokeStream` / `openChannel` / `channel.send` / `channel.close` / `shutdown`) over NDJSON on stdin/stdout. The Bowire host spawns your binary as a subprocess; your plugin code never touches the wire.
+
+## Duplex channels
+
+A plugin that serves duplex methods implements `ChannelHandler` and returns itself from `channels()`. The handshake then reports `capabilities.channels: true`; without a handler it reports `false` and the host never sends `openChannel`.
+
+```rust
+use bowire_plugin::{Channel, ChannelHandler, ChannelRequest};
+
+#[async_trait::async_trait]
+impl ChannelHandler for Echo {
+    async fn open_channel(&self, request: ChannelRequest, mut channel: Channel) -> Result<(), String> {
+        if request.method != "Chat" {
+            return Err(format!("no duplex method '{}'", request.method));
+        }
+        tokio::spawn(async move {
+            while let Some(frame) = channel.recv().await {
+                channel.send(format!(r#"{{"echoed":{frame}}}"#));
+            }
+        });
+        Ok(())
+    }
+}
+
+// in `impl BowirePlugin for Echo`:
+fn channels(&self) -> Option<&dyn ChannelHandler> { Some(self) }
+```
+
+The runtime keys every channel by the `channelId` the host minted, so several can be open at once:
+
+| Wire | Plugin side |
+|---|---|
+| `openChannel` | `open_channel(request, channel)`; `Ok` acks, `Err` refuses |
+| `channel.send` | the frame arrives at `channel.recv()`; a send to a closed channel gets a JSON-RPC error, which the host reads as `SendAsync` → `false` |
+| `channel.close` | `channel.recv()` returns `None`, once; the plugin can still flush frames |
+| `$/channel/data` | `channel.send(frame)` (or a `ChannelSender` from `channel.sender()`) |
+| `$/channel/closed` | `channel.close()`, or dropping the channel and every sender; sent exactly once |
 
 ## Run the example
 
@@ -111,8 +147,12 @@ BowirePlugin
 ├── async invoke(server_url, service, method,             // required
 │                json_messages, show_internal, metadata)
 ├── async invoke_stream(...) -> BoxStream<String>         // default: NotImplemented
-├── async open_channel(...) -> Option<()>                 // default: None (no duplex)
-└── settings() -> Vec<PluginSetting>                      // default: []
+├── channels() -> Option<&dyn ChannelHandler>             // default: None (no duplex)
+├── settings() -> Vec<PluginSetting>                      // default: []
+└── capabilities() -> Capabilities                        // default: derived
+
+ChannelHandler
+└── async open_channel(request, channel) -> Result<(), String>
 ```
 
 ## Contract reference

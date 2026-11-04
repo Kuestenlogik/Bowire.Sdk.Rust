@@ -105,6 +105,17 @@ impl MethodInfo {
         }
     }
 
+    /// Build a duplex method (both sides send over one long-lived
+    /// channel). Served through [`crate::BowirePlugin::channels`].
+    pub fn duplex(name: impl Into<String>) -> Self {
+        Self {
+            method_type: MethodType::Duplex,
+            client_streaming: true,
+            server_streaming: true,
+            ..Self::unary(name)
+        }
+    }
+
     /// Chainable: set the request schema.
     pub fn with_input(mut self, input: MessageInfo) -> Self {
         self.input_type = Some(input);

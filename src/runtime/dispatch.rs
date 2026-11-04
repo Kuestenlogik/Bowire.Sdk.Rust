@@ -3,7 +3,8 @@
 //! [`dispatch`]; the runtime owns the wire (NDJSON to stdout vs.
 //! SSE-queue), the dispatcher owns the contract semantics
 //! (which method maps to which trait call + how server-streaming
-//! is decomposed into an ack + pump).
+//! is decomposed into an ack + pump, and which channel a
+//! `channel.send` / `channel.close` belongs to).
 
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -11,8 +12,30 @@ use std::sync::Arc;
 use futures::stream::BoxStream;
 use serde_json::{json, Value};
 
+use crate::channel::{ChannelRefusal, ChannelRegistry, ChannelRequest, Notify};
 use crate::plugin::BowirePlugin;
 use crate::runtime::jsonrpc::{Request, Response};
+
+/// JSON-RPC error for a `channel.send` / `channel.close` on a channel that
+/// is gone (or never was). The host reads any error here as
+/// `SendAsync` → `false`; the code just tells a log reader which case.
+pub(crate) const CHANNEL_CLOSED: i32 = -32001;
+
+/// Per-connection state the dispatcher needs beyond the plugin: the open
+/// channels and the queue server-initiated notifications go out on.
+pub(crate) struct Session {
+    pub(crate) channels: ChannelRegistry,
+    pub(crate) notify: Notify,
+}
+
+impl Session {
+    pub(crate) fn new(notify: Notify) -> Self {
+        Self {
+            channels: ChannelRegistry::default(),
+            notify,
+        }
+    }
+}
 
 /// One method-dispatch outcome the runtime then has to act on.
 pub(crate) enum DispatchResult {
@@ -35,10 +58,15 @@ pub(crate) enum DispatchResult {
     Shutdown(Response),
 }
 
-/// Dispatch a single JSON-RPC request against `plugin`. Pure async
-/// function: no IO, no spawning, no stdout writes. The runtime
-/// handles every transport effect.
-pub(crate) async fn dispatch<P: BowirePlugin>(plugin: Arc<P>, req: Request) -> DispatchResult {
+/// Dispatch a single JSON-RPC request against `plugin`. No IO, no
+/// spawning, no stdout writes: the runtime handles every transport
+/// effect. Channel frames leave through `session.notify`, which the
+/// runtime backs with its own ordered queue.
+pub(crate) async fn dispatch<P: BowirePlugin>(
+    plugin: Arc<P>,
+    req: Request,
+    session: &Session,
+) -> DispatchResult {
     let id = req.id.unwrap_or(Value::Null);
     let params = req.params.unwrap_or_else(|| json!({}));
 
@@ -55,7 +83,7 @@ pub(crate) async fn dispatch<P: BowirePlugin>(plugin: Arc<P>, req: Request) -> D
                 // with a warning in the host log on every boot, which is what
                 // this runtime used to earn.
                 "protocolVersion": crate::SIDECAR_PROTOCOL_VERSION,
-                "capabilities": plugin.capabilities(),
+                "capabilities": capabilities(plugin.as_ref()),
             }),
         )),
         // The contract's reply is the bare string. `{}` was this runtime's
@@ -126,11 +154,108 @@ pub(crate) async fn dispatch<P: BowirePlugin>(plugin: Arc<P>, req: Request) -> D
                 stream,
             }
         }
+        "openChannel" => {
+            DispatchResult::Reply(open_channel(plugin.as_ref(), id, &params, session).await)
+        }
+        "channel.send" => {
+            let channel_id = string_param(&params, "channelId").unwrap_or_default();
+            // The frame is a string on the wire; a host that sends a JSON
+            // value instead still gets it through, as its JSON text.
+            let message = match params.get("message") {
+                Some(Value::String(s)) => s.clone(),
+                Some(other) => other.to_string(),
+                None => String::new(),
+            };
+            DispatchResult::Reply(match session.channels.deliver(&channel_id, message) {
+                Ok(()) => Response::ok(id, json!(true)),
+                Err(refusal) => refused(id, &channel_id, refusal),
+            })
+        }
+        "channel.close" => {
+            let channel_id = string_param(&params, "channelId").unwrap_or_default();
+            DispatchResult::Reply(match session.channels.close_send_side(&channel_id) {
+                Ok(()) => Response::ok(id, json!({})),
+                Err(refusal) => refused(id, &channel_id, refusal),
+            })
+        }
         other => DispatchResult::Reply(Response::err(
             id,
             -32601,
             format!("method '{other}' not handled by bowire-plugin runtime"),
         )),
+    }
+}
+
+/// What goes into the handshake: the plugin's own report, except that
+/// `channels` cannot be claimed without a handler to route it to.
+fn capabilities<P: BowirePlugin>(plugin: &P) -> crate::plugin::Capabilities {
+    let mut caps = plugin.capabilities();
+    caps.channels &= plugin.channels().is_some();
+    caps
+}
+
+/// `openChannel`: register the host's id first — so a frame the plugin
+/// pushes, or a `channel.send` racing the ack, already finds the channel —
+/// then let the plugin accept or refuse it.
+async fn open_channel<P: BowirePlugin>(
+    plugin: &P,
+    id: Value,
+    params: &Value,
+    session: &Session,
+) -> Response {
+    let Some(handler) = plugin.channels() else {
+        return Response::err(
+            id,
+            -32601,
+            format!("plugin '{}' does not serve duplex channels", plugin.id()),
+        );
+    };
+    // The host mints the id and subscribes to it before asking. An id of
+    // our own would publish frames nobody listens to.
+    let Some(channel_id) = string_param(params, "channelId").filter(|s| !s.is_empty()) else {
+        return Response::err(id, -32602, "openChannel requires a channelId");
+    };
+    let request = ChannelRequest {
+        server_url: string_param(params, "serverUrl").unwrap_or_default(),
+        service: string_param(params, "service").unwrap_or_default(),
+        method: string_param(params, "method").unwrap_or_default(),
+        show_internal: bool_param(params, "showInternalServices").unwrap_or(false),
+        metadata: map_param(params, "metadata"),
+    };
+    let channel = match session
+        .channels
+        .begin_open(&channel_id, session.notify.clone())
+    {
+        Ok(channel) => channel,
+        Err(refusal) => return refused(id, &channel_id, refusal),
+    };
+    let outcome = handler.open_channel(request, channel).await;
+    session
+        .channels
+        .finish_open(&channel_id, outcome.is_ok(), &session.notify);
+    match outcome {
+        Ok(()) => Response::ok(id, json!({ "channelId": channel_id })),
+        Err(message) => Response::err(id, -32000, message),
+    }
+}
+
+fn refused(id: Value, channel_id: &str, refusal: ChannelRefusal) -> Response {
+    match refusal {
+        ChannelRefusal::Unknown => Response::err(
+            id,
+            CHANNEL_CLOSED,
+            format!("no open channel '{channel_id}'"),
+        ),
+        ChannelRefusal::Closed => Response::err(
+            id,
+            CHANNEL_CLOSED,
+            format!("channel '{channel_id}' is closed"),
+        ),
+        ChannelRefusal::Duplicate => Response::err(
+            id,
+            -32602,
+            format!("channel '{channel_id}' is already open"),
+        ),
     }
 }
 
@@ -209,6 +334,10 @@ mod tests {
         }
     }
 
+    fn session() -> Session {
+        Session::new(Arc::new(|_| {}))
+    }
+
     fn result_of(outcome: DispatchResult) -> Value {
         match outcome {
             DispatchResult::Reply(r) => r.result.expect("a reply carries a result"),
@@ -221,7 +350,7 @@ mod tests {
     /// sidecar at the handshake instead of at the first call.
     #[tokio::test]
     async fn initialize_advertises_contract_version_and_capabilities() {
-        let result = result_of(dispatch(Arc::new(Fake), request("initialize")).await);
+        let result = result_of(dispatch(Arc::new(Fake), request("initialize"), &session()).await);
 
         assert_eq!(
             result["protocolVersion"],
@@ -243,7 +372,7 @@ mod tests {
     /// used to send meant a Rust sidecar discovered nothing, ever.
     #[tokio::test]
     async fn discover_replies_with_a_bare_array() {
-        let result = result_of(dispatch(Arc::new(Fake), request("discover")).await);
+        let result = result_of(dispatch(Arc::new(Fake), request("discover"), &session()).await);
 
         let services = result.as_array().expect("discover replies with an array");
         assert_eq!(services.len(), 1);
@@ -254,7 +383,7 @@ mod tests {
     /// invention.
     #[tokio::test]
     async fn ping_replies_with_the_bare_pong_string() {
-        let result = result_of(dispatch(Arc::new(Fake), request("ping")).await);
+        let result = result_of(dispatch(Arc::new(Fake), request("ping"), &session()).await);
 
         assert_eq!(result, json!("pong"));
     }

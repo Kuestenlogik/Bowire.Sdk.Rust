@@ -27,7 +27,7 @@ use tokio::sync::broadcast;
 use tokio_stream::wrappers::BroadcastStream;
 
 use crate::plugin::BowirePlugin;
-use crate::runtime::dispatch::{dispatch, DispatchResult};
+use crate::runtime::dispatch::{dispatch, DispatchResult, Session};
 use crate::runtime::jsonrpc::{Notification, Request};
 
 /// Channel capacity for server-initiated notifications. Bounded so a
@@ -62,9 +62,16 @@ pub async fn run_http<P: BowirePlugin>(plugin: P, host: &str, port: u16) -> std:
     let plugin = Arc::new(plugin);
     let (notification_tx, _) = broadcast::channel::<Notification>(NOTIFICATION_CHANNEL_CAPACITY);
 
+    let session = {
+        let notifications = notification_tx.clone();
+        Arc::new(Session::new(Arc::new(move |n| {
+            let _ = notifications.send(n);
+        })))
+    };
     let state = HttpState {
         plugin,
         notifications: notification_tx,
+        session,
     };
 
     let app = Router::new()
@@ -93,6 +100,7 @@ async fn shutdown_signal() {
 struct HttpState<P: BowirePlugin> {
     plugin: Arc<P>,
     notifications: broadcast::Sender<Notification>,
+    session: Arc<Session>,
 }
 
 // Manual `Clone` impl — `#[derive(Clone)]` would add an unwanted
@@ -104,6 +112,7 @@ impl<P: BowirePlugin> Clone for HttpState<P> {
         Self {
             plugin: self.plugin.clone(),
             notifications: self.notifications.clone(),
+            session: self.session.clone(),
         }
     }
 }
@@ -123,7 +132,7 @@ async fn post_rpc<P: BowirePlugin>(
     };
 
     let plugin = state.plugin.clone();
-    let outcome = dispatch(plugin, req).await;
+    let outcome = dispatch(plugin, req, &state.session).await;
 
     match outcome {
         DispatchResult::Reply(resp) | DispatchResult::Shutdown(resp) => Ok(Json(

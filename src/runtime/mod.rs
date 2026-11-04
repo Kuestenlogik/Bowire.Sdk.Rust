@@ -19,4 +19,7 @@ pub mod stdio;
 pub mod http;
 
 mod dispatch;
-mod jsonrpc;
+pub(crate) mod jsonrpc;
+
+#[cfg(test)]
+mod channel_tests;

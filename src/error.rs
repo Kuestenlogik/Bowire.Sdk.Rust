@@ -25,7 +25,7 @@ pub enum Error {
     BadEnvelope(String),
 
     /// The host called a method this plugin doesn't implement —
-    /// usually `invoke_stream` or `open_channel` left at default.
+    /// usually `invoke_stream` left at default.
     #[error("method not implemented: {0}")]
     NotImplemented(&'static str),
 }

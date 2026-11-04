@@ -10,10 +10,10 @@ use std::sync::Arc;
 use futures::stream::StreamExt;
 use serde_json::json;
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
-use tokio::sync::Mutex;
+use tokio::sync::{mpsc, Mutex};
 
 use crate::plugin::BowirePlugin;
-use crate::runtime::dispatch::{dispatch, DispatchResult};
+use crate::runtime::dispatch::{dispatch, DispatchResult, Session};
 use crate::runtime::jsonrpc::{Notification, Request, Response};
 
 /// Drive `plugin` against stdin/stdout. Returns 0 on a clean
@@ -43,6 +43,23 @@ pub async fn run<P: BowirePlugin>(plugin: P) -> i32 {
     // request handlers + stream pumps don't interleave envelopes
     // mid-line.
     let stdout = Arc::new(Mutex::new(tokio::io::stdout()));
+
+    // Channel frames are pushed synchronously (a dropped channel handle
+    // still has to announce `$/channel/closed`), so they go through one
+    // queue and a single writer task: in order, never mid-line.
+    let (notify_tx, mut notify_rx) = mpsc::unbounded_channel::<Notification>();
+    {
+        let stdout = stdout.clone();
+        tokio::spawn(async move {
+            while let Some(notification) = notify_rx.recv().await {
+                let _ = write_notification(&stdout, notification).await;
+            }
+        });
+    }
+    let session = Arc::new(Session::new(Arc::new(move |n| {
+        let _ = notify_tx.send(n);
+    })));
+
     let stdin = tokio::io::stdin();
     let mut reader = BufReader::new(stdin).lines();
 
@@ -66,8 +83,9 @@ pub async fn run<P: BowirePlugin>(plugin: P) -> i32 {
 
         let plugin = plugin.clone();
         let stdout = stdout.clone();
+        let session = session.clone();
         tokio::spawn(async move {
-            handle(plugin, req, stdout).await;
+            handle(plugin, req, stdout, &session).await;
         });
     }
 }
@@ -76,8 +94,9 @@ async fn handle<P: BowirePlugin>(
     plugin: Arc<P>,
     req: Request,
     stdout: Arc<Mutex<tokio::io::Stdout>>,
+    session: &Session,
 ) {
-    match dispatch(plugin, req).await {
+    match dispatch(plugin, req, session).await {
         DispatchResult::Reply(resp) | DispatchResult::Shutdown(resp) => {
             // Shutdown is acked just like any other request; the read
             // loop exits on the next EOF the host writes.

@@ -1,6 +1,7 @@
 //! Echo — minimal Bowire sidecar plugin. Parrots whatever the
 //! workbench POSTs against `DemoService.Echo` back inside an
-//! `{"echoed": <input>}` envelope. Run with
+//! `{"echoed": <input>}` envelope, and does the same per frame over the
+//! duplex `DemoService.Chat` channel. Run with
 //!
 //! ```text
 //! cargo run --example echo
@@ -12,7 +13,8 @@
 use std::collections::HashMap;
 
 use bowire_plugin::{
-    run, BowirePlugin, FieldInfo, InvokeResult, MessageInfo, MethodInfo, ServiceInfo,
+    run, BowirePlugin, Channel, ChannelHandler, ChannelRequest, FieldInfo, InvokeResult,
+    MessageInfo, MethodInfo, ServiceInfo,
 };
 
 struct Echo;
@@ -43,11 +45,16 @@ impl BowirePlugin for Echo {
             .with_fields([FieldInfo::string("echoed")]);
 
         let echo = MethodInfo::unary("Echo")
-            .with_input(request)
-            .with_output(reply)
+            .with_input(request.clone())
+            .with_output(reply.clone())
             .with_summary("Echo the request payload back.");
 
-        vec![ServiceInfo::new("DemoService").with_methods([echo])]
+        let chat = MethodInfo::duplex("Chat")
+            .with_input(request)
+            .with_output(reply)
+            .with_summary("Echo every frame back over one open channel.");
+
+        vec![ServiceInfo::new("DemoService").with_methods([echo, chat])]
     }
 
     async fn invoke(
@@ -67,6 +74,33 @@ impl BowirePlugin for Echo {
         // viewer renders whatever was sent. A real plugin would route
         // this through the underlying wire (HTTP, Zenoh, &c).
         InvokeResult::ok(format!(r#"{{"echoed":{payload}}}"#))
+    }
+
+    fn channels(&self) -> Option<&dyn ChannelHandler> {
+        Some(self)
+    }
+}
+
+#[async_trait::async_trait]
+impl ChannelHandler for Echo {
+    async fn open_channel(
+        &self,
+        request: ChannelRequest,
+        mut channel: Channel,
+    ) -> Result<(), String> {
+        if request.method != "Chat" {
+            return Err(format!("no duplex method '{}'", request.method));
+        }
+        // Drive the channel on its own task: open_channel returning Ok is
+        // what acks the host. When the host closes its send side, recv()
+        // ends, the task ends, and dropping the channel tells the host the
+        // channel is closed.
+        tokio::spawn(async move {
+            while let Some(frame) = channel.recv().await {
+                channel.send(format!(r#"{{"echoed":{frame}}}"#));
+            }
+        });
+        Ok(())
     }
 }
 

@@ -26,6 +26,15 @@ fn method_info_unary_is_not_streaming() {
 }
 
 #[test]
+fn method_info_duplex_streams_both_ways() {
+    let m = MethodInfo::duplex("Chat");
+    assert!(m.client_streaming);
+    assert!(m.server_streaming);
+    assert_eq!(m.method_type, MethodType::Duplex);
+    assert_eq!(serde_json::to_value(&m).unwrap()["methodType"], "Duplex");
+}
+
+#[test]
 fn method_info_server_streaming_sets_flag_and_marker() {
     let m = MethodInfo::server_streaming("Watch");
     assert!(!m.client_streaming);

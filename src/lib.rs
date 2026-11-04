@@ -56,15 +56,25 @@
 //!   and a long-lived SSE GET drains server-initiated notifications.
 //!   Fits hosted / multi-tenant deployments where one sidecar serves
 //!   many Bowire workbenches.
+//!
+//! ## Duplex channels
+//!
+//! Implement [`ChannelHandler`] and return `Some(self)` from
+//! [`BowirePlugin::channels`]; the handshake then reports
+//! `capabilities.channels: true` and the runtime routes `openChannel` /
+//! `channel.send` / `channel.close` to the [`Channel`] it hands you, keyed
+//! by the host's `channelId`. The echo example serves one.
 
 #![forbid(unsafe_code)]
 #![warn(missing_docs)]
 
+mod channel;
 mod error;
 mod models;
 mod plugin;
 mod runtime;
 
+pub use channel::{Channel, ChannelHandler, ChannelReceiver, ChannelRequest, ChannelSender};
 pub use error::{Error, Result};
 pub use models::{
     FieldInfo, InvokeResult, MessageInfo, MethodInfo, MethodType, PluginSetting, ServiceInfo,

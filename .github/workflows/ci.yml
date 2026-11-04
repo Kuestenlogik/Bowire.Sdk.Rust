@@ -107,3 +107,41 @@ jobs:
           out=$(bowire --plugin-dir "$PWD/plugins" discover --url "echo-rs@http://localhost:1")
           echo "$out"
           echo "$out" | grep -q "DemoService"
+
+      # A duplex method end to end (#5). The CLI subcommands have no duplex
+      # mode — `bowire call --stream` drives invokeStream, not openChannel —
+      # so this goes through the workbench's channel endpoints, which call
+      # the host's SidecarChannel exactly as the browser UI does: open, read
+      # the SSE stream, send twice, close. The stream ending with
+      # `event: done` is the host having received `$/channel/closed`.
+      # Every wait is on a signal: the banner line that carries the bound
+      # URL, and the SSE request returning when the host ends the stream.
+      - name: Duplex channel through the real host
+        run: |
+          set -euo pipefail
+          bowire --plugin-dir "$PWD/plugins" --no-browser --port 0 > host.log 2>&1 &
+          host=$!
+          trap 'kill $host 2>/dev/null || true' EXIT
+          banner=$(timeout 60 grep -m1 "Bowire is running at" <(tail -n +1 -f host.log))
+          url=$(echo "$banner" | grep -o 'http://[^ ]*' | sed 's:/*$::')
+          echo "host at $url"
+
+          open=$(curl -sf -X POST "$url/api/channel/open?serverUrl=echo-rs@http://localhost:1" \
+            -H 'content-type: application/json' \
+            -d '{"service":"DemoService","method":"Chat","protocol":"echo-rs"}')
+          echo "$open"
+          id=$(echo "$open" | jq -er .channelId)
+
+          curl -sfN "$url/api/channel/$id/responses" > responses.txt &
+          sse=$!
+          for word in one two; do
+            curl -sf -X POST "$url/api/channel/$id/send" -H 'content-type: application/json' \
+              -d "{\"message\":\"{\\\"message\\\":\\\"$word\\\"}\"}" | jq -e '.sent == true'
+          done
+          curl -sf -X POST "$url/api/channel/$id/close" | jq -e '.closed == true'
+          wait $sse
+          cat responses.txt
+
+          grep -q 'echoed\\":{\\"message\\":\\"one' responses.txt
+          grep -q 'echoed\\":{\\"message\\":\\"two' responses.txt
+          grep -q '^event: done' responses.txt
