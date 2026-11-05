@@ -13,6 +13,7 @@ use futures::stream::{self, BoxStream};
 use serde::{Deserialize, Serialize};
 
 use crate::channel::ChannelHandler;
+use crate::manual_entry::ManualEntryForm;
 use crate::models::{InvokeResult, PluginSetting, ServiceInfo};
 use crate::settings::Settings;
 
@@ -81,6 +82,15 @@ pub trait BowirePlugin: Send + Sync + 'static {
     /// Default: no settings.
     fn settings(&self) -> Vec<PluginSetting> {
         Vec::new()
+    }
+
+    /// How a call to this plugin is entered by hand, without discovery
+    /// (Kuestenlogik/Bowire#1003): sent in the `initialize` reply as
+    /// `manualEntry`, and rendered by the workbench as a Compose form. A form
+    /// the host would refuse fails the handshake, naming why
+    /// ([`crate::manual_entry_problems`]). Default: none.
+    fn manual_entry(&self) -> Option<ManualEntryForm> {
+        None
     }
 
     /// What this plugin can actually answer, reported in the

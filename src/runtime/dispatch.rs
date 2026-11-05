@@ -86,21 +86,35 @@ pub(crate) async fn dispatch<P: BowirePlugin>(
                     format!("settings: {}", problems.join("; ")),
                 ));
             }
-            DispatchResult::Reply(Response::ok(
-                id,
-                json!({
-                    "id": plugin.id(),
-                    "name": plugin.name(),
-                    "iconSvg": plugin.icon_svg(),
-                    "settings": declared,
-                    // #416: which contract this sidecar speaks, and what it can
-                    // answer. A reply without them is tolerated as legacy v1 —
-                    // with a warning in the host log on every boot, which is what
-                    // this runtime used to earn.
-                    "protocolVersion": crate::SIDECAR_PROTOCOL_VERSION,
-                    "capabilities": capabilities(plugin.as_ref()),
-                }),
-            ))
+            // Kuestenlogik/Bowire#1003: a form the host would refuse fails the
+            // handshake with the reason, rather than silently never appearing.
+            let manual_entry = plugin.manual_entry();
+            if let Some(form) = &manual_entry {
+                let problems = crate::manual_entry::manual_entry_problems(form);
+                if !problems.is_empty() {
+                    return DispatchResult::Reply(Response::err(
+                        id,
+                        -32603,
+                        format!("manualEntry: {}", problems.join("; ")),
+                    ));
+                }
+            }
+            let mut reply = json!({
+                "id": plugin.id(),
+                "name": plugin.name(),
+                "iconSvg": plugin.icon_svg(),
+                "settings": declared,
+                // #416: which contract this sidecar speaks, and what it can
+                // answer. A reply without them is tolerated as legacy v1 —
+                // with a warning in the host log on every boot, which is what
+                // this runtime used to earn.
+                "protocolVersion": crate::SIDECAR_PROTOCOL_VERSION,
+                "capabilities": capabilities(plugin.as_ref()),
+            });
+            if let Some(form) = manual_entry {
+                reply["manualEntry"] = json!(form);
+            }
+            DispatchResult::Reply(Response::ok(id, reply))
         }
         // The contract's reply is the bare string. `{}` was this runtime's
         // own invention; a host using ping as a liveness probe reads it as a
@@ -530,5 +544,80 @@ mod tests {
         assert!(error
             .message
             .contains("select setting 'mode' declares no options"));
+    }
+
+    struct WithForm(Option<crate::manual_entry::ManualEntryForm>);
+
+    #[async_trait]
+    impl BowirePlugin for WithForm {
+        fn id(&self) -> &str {
+            "with-form"
+        }
+
+        fn name(&self) -> &str {
+            "With form"
+        }
+
+        fn manual_entry(&self) -> Option<crate::manual_entry::ManualEntryForm> {
+            self.0.clone()
+        }
+
+        async fn discover(&self, _request: DiscoverRequest) -> Vec<ServiceInfo> {
+            Vec::new()
+        }
+
+        async fn invoke(&self, _request: InvokeRequest) -> InvokeResult {
+            InvokeResult::default()
+        }
+    }
+
+    /// Kuestenlogik/Bowire#1003: the declared form travels in the handshake;
+    /// none means no field at all; a broken one fails it with the reason.
+    #[tokio::test]
+    async fn initialize_carries_the_hand_entry_form() {
+        use crate::manual_entry::{ManualCallKind, ManualEntryForm, ManualField};
+
+        let form = ManualEntryForm::new([
+            ManualCallKind::new("produce", "Unary").with_target("{topic}", "produce")
+        ])
+        .with_fields([ManualField::template("topic", "Topic").required()]);
+        let result = result_of(
+            dispatch(
+                Arc::new(WithForm(Some(form))),
+                request("initialize"),
+                &session(),
+            )
+            .await,
+        );
+        assert_eq!(
+            result["manualEntry"]["callKinds"][0]["service"],
+            json!("{topic}")
+        );
+        assert_eq!(
+            result["manualEntry"]["fields"][0]["placement"],
+            json!("template")
+        );
+
+        let none =
+            result_of(dispatch(Arc::new(WithForm(None)), request("initialize"), &session()).await);
+        assert!(none.get("manualEntry").is_none());
+
+        let broken = ManualEntryForm::new([
+            ManualCallKind::new("produce", "Unary").with_target("{topic}", "produce")
+        ]);
+        let DispatchResult::Reply(reply) = dispatch(
+            Arc::new(WithForm(Some(broken))),
+            request("initialize"),
+            &session(),
+        )
+        .await
+        else {
+            panic!("expected a plain reply");
+        };
+        assert!(reply
+            .error
+            .expect("an error")
+            .message
+            .contains("placeholder 'topic'"));
     }
 }

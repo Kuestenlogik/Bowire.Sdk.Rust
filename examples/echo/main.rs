@@ -12,8 +12,8 @@
 
 use bowire_plugin::{
     run, BowirePlugin, Channel, ChannelHandler, ChannelRequest, DiscoverRequest, FieldInfo,
-    InvokeRequest, InvokeResult, MessageInfo, MethodInfo, PluginSetting, ServiceInfo,
-    SettingOption, Settings,
+    InvokeRequest, InvokeResult, ManualCallKind, ManualEntryForm, MessageInfo, MethodInfo,
+    PluginSetting, ServiceInfo, SettingOption, Settings,
 };
 
 /// What Echo and Chat do to the payload before sending it back: a select
@@ -53,6 +53,21 @@ impl BowirePlugin for Echo {
                 SettingOption::labelled("upper", "Upper case"),
                 SettingOption::labelled("lower", "Lower case"),
             ])]
+    }
+
+    // How the two methods are called by hand, without discovery
+    // (Kuestenlogik/Bowire#1003): the workbench renders a form from this.
+    fn manual_entry(&self) -> Option<ManualEntryForm> {
+        Some(ManualEntryForm::new([
+            ManualCallKind::new("echo", "Unary")
+                .with_label("Echo")
+                .with_target("DemoService", "Echo")
+                .with_body_example(r#"{"message":"hello"}"#),
+            ManualCallKind::new("chat", "Duplex")
+                .with_label("Chat")
+                .with_target("DemoService", "Chat")
+                .with_body_example(r#"{"message":"hello"}"#),
+        ]))
     }
 
     async fn discover(&self, _request: DiscoverRequest) -> Vec<ServiceInfo> {

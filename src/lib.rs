@@ -65,6 +65,7 @@
 
 mod channel;
 mod error;
+mod manual_entry;
 mod models;
 mod plugin;
 mod runtime;
@@ -72,6 +73,7 @@ mod settings;
 
 pub use channel::{Channel, ChannelHandler, ChannelReceiver, ChannelRequest, ChannelSender};
 pub use error::{Error, Result};
+pub use manual_entry::{manual_entry_problems, ManualCallKind, ManualEntryForm, ManualField};
 pub use models::{
     FieldInfo, InvokeResult, MessageInfo, MethodInfo, MethodType, PluginSetting, ServiceInfo,
     SettingOption,

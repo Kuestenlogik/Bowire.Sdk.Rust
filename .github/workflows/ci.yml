@@ -137,6 +137,17 @@ jobs:
           curl -sf -X PUT "$url/api/plugins/settings/echo-rs/transform?$q"             -H 'content-type: application/json' -d '{"value":null}' > /dev/null
           echo_hi | grep -q '"message":"hi"'
 
+          # The hand-entry form the example declares (Kuestenlogik/Bowire#1003).
+          # A host before 2.11 has no ManualEntry service (404): a note, not a
+          # failure, until the released tool is 2.11.
+          status=$(curl -s -o forms.json -w '%{http_code}' "$url/api/v1/manual-entry-forms?pageSize=200")
+          if [ "$status" = "404" ]; then
+            echo "manual entry: skipped, this host predates Bowire 2.11"
+          else
+            jq -e '.forms[] | select(.protocol == "echo-rs")
+                   | [.callKinds[] | "\(.id):\(.methodType)"] == ["echo:Unary","chat:Duplex"]' forms.json
+          fi
+
       # A duplex method end to end (#5). The CLI subcommands have no duplex
       # mode — `bowire call --stream` drives invokeStream, not openChannel —
       # so this goes through the workbench's channel endpoints, which call

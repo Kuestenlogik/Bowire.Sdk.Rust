@@ -83,6 +83,42 @@ async fn invoke(&self, request: InvokeRequest) -> InvokeResult {
 - `has(key)` and `raw(key)` say whether the host sent a value and what text
   it was.
 
+## Hand-entry form
+
+A user can call your plugin without discovery, from the workbench's freeform
+form or Compose, and only your plugin knows what such a call needs. Return it
+from `manual_entry()`. The runtime puts it in the `initialize` reply, and the
+workbench renders a Compose form from it and offers exactly these method types
+in the freeform form (Bowire 2.11 or later).
+
+```rust
+use bowire_plugin::{ManualCallKind, ManualEntryForm, ManualField};
+
+fn manual_entry(&self) -> Option<ManualEntryForm> {
+    Some(
+        ManualEntryForm::new([
+            ManualCallKind::new("produce", "Unary").with_label("Produce").with_target("{topic}", "produce"),
+            ManualCallKind::new("consume", "ServerStreaming").with_label("Consume").with_target("{topic}", "consume"),
+        ])
+        .with_fields([
+            ManualField::template("topic", "Topic").required(),
+            ManualField::metadata("key", "Key").for_call_kinds(["produce"]),
+        ])
+        .with_url_placeholder("mybroker://localhost:9000"),
+    )
+}
+```
+
+- A **call kind** names how it runs: `Unary` is `invoke`, `ServerStreaming`
+  is `invoke_stream`, and `ClientStreaming` or `Duplex` opens a channel. Its
+  service and method are templates, in which `{key}` is the value of the field
+  with that key.
+- A **template** field only feeds the templates. A **metadata** field goes
+  into the call's metadata under its key, which is where your `invoke` reads it.
+- A form the host would refuse fails `initialize`, naming the problem.
+  Examples are an unknown method type, a placeholder no field declares, and a
+  `select` without options. `manual_entry_problems(&form)` runs the same check.
+
 ## Duplex channels
 
 A plugin that serves duplex methods implements `ChannelHandler` and returns itself from `channels()`. The handshake then reports `capabilities.channels: true`; without a handler it reports `false` and the host never sends `openChannel`.
@@ -183,6 +219,7 @@ BowirePlugin
 ├── async invoke_stream(InvokeRequest) -> BoxStream       // default: NotImplemented
 ├── channels() -> Option<&dyn ChannelHandler>             // default: None (no duplex)
 ├── settings() -> Vec<PluginSetting>                      // default: []
+├── manual_entry() -> Option<ManualEntryForm>             // default: None
 └── capabilities() -> Capabilities                        // default: derived
 
 ChannelHandler
