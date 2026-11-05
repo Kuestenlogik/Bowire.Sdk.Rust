@@ -9,8 +9,9 @@ use std::sync::Arc;
 
 use futures::stream::StreamExt;
 use serde_json::json;
-use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
-use tokio::sync::{mpsc, Mutex};
+use tokio::io::{AsyncBufReadExt, AsyncRead, AsyncWrite, AsyncWriteExt, BufReader};
+use tokio::sync::{mpsc, oneshot, Mutex};
+use tokio::task::JoinSet;
 
 use crate::plugin::BowirePlugin;
 use crate::runtime::dispatch::{dispatch, DispatchResult, Session};
@@ -37,36 +38,71 @@ use crate::runtime::jsonrpc::{Notification, Request, Response};
 /// }
 /// ```
 pub async fn run<P: BowirePlugin>(plugin: P) -> i32 {
+    run_with(plugin, tokio::io::stdin(), tokio::io::stdout()).await
+}
+
+/// What the single writer task puts on the wire, in order: channel frames,
+/// and the flush marker the read loop sends at EOF to learn that every
+/// frame queued before it has been written.
+enum Outbound {
+    Frame(Notification),
+    Flush(oneshot::Sender<()>),
+}
+
+/// The read loop over any reader and writer; [`run`] passes stdin and stdout.
+///
+/// At EOF it stops reading, lets the requests already read finish — their
+/// replies and stream frames included — and drains the frame queue before it
+/// returns (#10). It used to return at EOF straight away, so input piped in
+/// all at once could produce no output at all.
+pub(crate) async fn run_with<P, R, W>(plugin: P, input: R, output: W) -> i32
+where
+    P: BowirePlugin,
+    R: AsyncRead + Unpin + Send + 'static,
+    W: AsyncWrite + Unpin + Send + 'static,
+{
     let plugin = Arc::new(plugin);
-    // stdout is single-writer (serialised by the Mutex) so concurrent
+    // The writer is single-writer (serialised by the Mutex) so concurrent
     // request handlers + stream pumps don't interleave envelopes
     // mid-line.
-    let stdout = Arc::new(Mutex::new(tokio::io::stdout()));
+    let output = Arc::new(Mutex::new(output));
 
     // Channel frames are pushed synchronously (a dropped channel handle
     // still has to announce `$/channel/closed`), so they go through one
     // queue and a single writer task: in order, never mid-line.
-    let (notify_tx, mut notify_rx) = mpsc::unbounded_channel::<Notification>();
+    let (outbound_tx, mut outbound_rx) = mpsc::unbounded_channel::<Outbound>();
     {
-        let stdout = stdout.clone();
+        let output = output.clone();
         tokio::spawn(async move {
-            while let Some(notification) = notify_rx.recv().await {
-                let _ = write_notification(&stdout, notification).await;
+            while let Some(item) = outbound_rx.recv().await {
+                match item {
+                    Outbound::Frame(notification) => {
+                        let _ = write_notification(&output, notification).await;
+                    }
+                    Outbound::Flush(done) => {
+                        let _ = done.send(());
+                    }
+                }
             }
         });
     }
+    let frames = outbound_tx.clone();
     let session = Arc::new(Session::new(Arc::new(move |n| {
-        let _ = notify_tx.send(n);
+        let _ = frames.send(Outbound::Frame(n));
     })));
 
-    let stdin = tokio::io::stdin();
-    let mut reader = BufReader::new(stdin).lines();
+    let mut reader = BufReader::new(input).lines();
+    let mut in_flight = JoinSet::new();
 
-    loop {
+    let code = loop {
+        // Reap what has finished, so a long session does not hold on to
+        // every request it ever handled.
+        while in_flight.try_join_next().is_some() {}
+
         let line = match reader.next_line().await {
             Ok(Some(line)) => line,
-            Ok(None) => return 0, // EOF — host disconnected cleanly
-            Err(_) => return 1,   // unrecoverable I/O error
+            Ok(None) => break 0, // EOF — the host disconnected cleanly
+            Err(_) => break 1,   // unrecoverable I/O error
         };
         if line.trim().is_empty() {
             continue;
@@ -81,18 +117,27 @@ pub async fn run<P: BowirePlugin>(plugin: P) -> i32 {
         };
 
         let plugin = plugin.clone();
-        let stdout = stdout.clone();
+        let output = output.clone();
         let session = session.clone();
-        tokio::spawn(async move {
-            handle(plugin, req, stdout, &session).await;
+        in_flight.spawn(async move {
+            handle(plugin, req, output, &session).await;
         });
+    };
+
+    // Every request read gets its reply, and every frame queued before the
+    // marker is on the wire, before the process goes.
+    while in_flight.join_next().await.is_some() {}
+    let (done_tx, done_rx) = oneshot::channel();
+    if outbound_tx.send(Outbound::Flush(done_tx)).is_ok() {
+        let _ = done_rx.await;
     }
+    code
 }
 
-async fn handle<P: BowirePlugin>(
+async fn handle<P: BowirePlugin, W: AsyncWrite + Unpin + Send>(
     plugin: Arc<P>,
     req: Request,
-    stdout: Arc<Mutex<tokio::io::Stdout>>,
+    stdout: Arc<Mutex<W>>,
     session: &Session,
 ) {
     match dispatch(plugin, req, session).await {
@@ -136,8 +181,8 @@ async fn handle<P: BowirePlugin>(
 
 // ---- IO helpers (NDJSON framing) -------------------------------
 
-async fn write_response(
-    stdout: &Arc<Mutex<tokio::io::Stdout>>,
+async fn write_response<W: AsyncWrite + Unpin>(
+    stdout: &Arc<Mutex<W>>,
     response: Response,
 ) -> std::io::Result<()> {
     let mut line = serde_json::to_vec(&response).unwrap_or_default();
@@ -147,8 +192,8 @@ async fn write_response(
     guard.flush().await
 }
 
-async fn write_notification(
-    stdout: &Arc<Mutex<tokio::io::Stdout>>,
+async fn write_notification<W: AsyncWrite + Unpin>(
+    stdout: &Arc<Mutex<W>>,
     notification: Notification,
 ) -> std::io::Result<()> {
     let mut line = serde_json::to_vec(&notification).unwrap_or_default();
@@ -156,4 +201,68 @@ async fn write_notification(
     let mut guard = stdout.lock().await;
     guard.write_all(&line).await?;
     guard.flush().await
+}
+
+#[cfg(test)]
+mod tests {
+    use tokio::io::AsyncReadExt;
+
+    use super::*;
+    use crate::models::{InvokeResult, ServiceInfo};
+    use crate::plugin::{DiscoverRequest, InvokeRequest};
+
+    struct Slow;
+
+    #[async_trait::async_trait]
+    impl BowirePlugin for Slow {
+        fn id(&self) -> &str {
+            "slow"
+        }
+
+        fn name(&self) -> &str {
+            "Slow"
+        }
+
+        async fn discover(&self, _request: DiscoverRequest) -> Vec<ServiceInfo> {
+            Vec::new()
+        }
+
+        // Still busy when the input has long ended: the reply must come anyway.
+        async fn invoke(&self, _request: InvokeRequest) -> InvokeResult {
+            tokio::task::yield_now().await;
+            tokio::task::yield_now().await;
+            InvokeResult::ok("{}")
+        }
+    }
+
+    /// #10: input piped in all at once, then EOF. Every request read gets
+    /// its reply before `run` returns.
+    #[tokio::test]
+    async fn requests_read_before_eof_all_get_their_reply() {
+        let input = concat!(
+            r#"{"jsonrpc":"2.0","id":1,"method":"initialize","params":{}}"#,
+            "\n",
+            r#"{"jsonrpc":"2.0","id":2,"method":"invoke","params":{}}"#,
+            "\n",
+            r#"{"jsonrpc":"2.0","id":3,"method":"ping","params":{}}"#,
+            "\n",
+        );
+        let (output, mut read_back) = tokio::io::duplex(64 * 1024);
+
+        let code = run_with(Slow, input.as_bytes(), output).await;
+
+        assert_eq!(code, 0);
+        let mut written = String::new();
+        read_back.read_to_string(&mut written).await.unwrap();
+        let mut ids: Vec<i64> = written
+            .lines()
+            .map(|l| {
+                serde_json::from_str::<serde_json::Value>(l).unwrap()["id"]
+                    .as_i64()
+                    .unwrap()
+            })
+            .collect();
+        ids.sort_unstable();
+        assert_eq!(ids, vec![1, 2, 3], "every request got its reply: {written}");
+    }
 }

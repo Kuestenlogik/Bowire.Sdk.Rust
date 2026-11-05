@@ -46,9 +46,10 @@ jobs:
         run: cargo fmt --all -- --check
 
       # `cargo check --all-targets` type-checks the example; this runs the real
-      # binary. Not via `cargo run`: piping one line into it produced an empty
-      # stdout in CI while the same binary answers correctly when spawned
-      # directly — which is how the host spawns it anyway. The
+      # binary, the way the host spawns it. Piping a line in and closing stdin
+      # used to produce an empty stdout now and then: run() returned at EOF
+      # before the reply was written (#10). It now finishes the requests it
+      # read first, so this is also the check for that. The
       # assertion is the handshake (#416) rather than just the id, because a
       # reply without protocolVersion is what made the host treat every
       # plugin built with this SDK as a legacy v1 sidecar — and nothing in
