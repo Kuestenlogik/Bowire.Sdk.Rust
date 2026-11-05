@@ -240,6 +240,14 @@ Pre-1.0, changes land in one cut. Since 0.2.0:
   reached the host.
 - `ChannelRequest` gains `settings`.
 
+## Releasing
+
+Pushing a tag `vX.Y.Z` that matches `version` in `Cargo.toml` publishes the
+crate to crates.io (`.github/workflows/release.yml`). The workflow tests that
+commit, then publishes through crates.io Trusted Publishing, so no registry
+key is stored. A version already on crates.io is skipped. To publish an
+existing tag again, run the workflow by hand with that tag.
+
 ## Contract reference
 
 The JSON-RPC contract this SDK marshals against is documented in the host repo: [Sidecar plugins (docs/architecture)](https://bowire.io/docs/architecture/sidecar-plugins.html).
