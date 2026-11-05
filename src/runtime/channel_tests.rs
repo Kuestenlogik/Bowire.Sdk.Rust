@@ -7,7 +7,6 @@
 //! the session's and the ones inside the plugin's channel handles — so it
 //! returns exactly when the plugin's tasks have finished.
 
-use std::collections::HashMap;
 use std::sync::Arc;
 
 use async_trait::async_trait;
@@ -16,7 +15,7 @@ use tokio::sync::mpsc;
 
 use crate::channel::{Channel, ChannelHandler, ChannelRequest};
 use crate::models::{InvokeResult, ServiceInfo};
-use crate::plugin::{BowirePlugin, Capabilities};
+use crate::plugin::{BowirePlugin, Capabilities, DiscoverRequest, InvokeRequest};
 use crate::runtime::dispatch::{dispatch, DispatchResult, Session, CHANNEL_CLOSED};
 use crate::runtime::jsonrpc::{Notification, Request, Response};
 
@@ -37,19 +36,11 @@ impl BowirePlugin for Chat {
         "Chat"
     }
 
-    async fn discover(&self, _server_url: &str, _show_internal: bool) -> Vec<ServiceInfo> {
+    async fn discover(&self, _request: DiscoverRequest) -> Vec<ServiceInfo> {
         Vec::new()
     }
 
-    async fn invoke(
-        &self,
-        _server_url: &str,
-        _service: &str,
-        _method: &str,
-        _json_messages: Vec<String>,
-        _show_internal: bool,
-        _metadata: HashMap<String, String>,
-    ) -> InvokeResult {
+    async fn invoke(&self, _request: InvokeRequest) -> InvokeResult {
         InvokeResult::default()
     }
 
@@ -366,19 +357,11 @@ impl BowirePlugin for Claims {
         "Claims"
     }
 
-    async fn discover(&self, _server_url: &str, _show_internal: bool) -> Vec<ServiceInfo> {
+    async fn discover(&self, _request: DiscoverRequest) -> Vec<ServiceInfo> {
         Vec::new()
     }
 
-    async fn invoke(
-        &self,
-        _server_url: &str,
-        _service: &str,
-        _method: &str,
-        _json_messages: Vec<String>,
-        _show_internal: bool,
-        _metadata: HashMap<String, String>,
-    ) -> InvokeResult {
+    async fn invoke(&self, _request: InvokeRequest) -> InvokeResult {
         InvokeResult::default()
     }
 

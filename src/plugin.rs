@@ -2,7 +2,9 @@
 //! [`BowirePlugin::name`], [`BowirePlugin::discover`] and
 //! [`BowirePlugin::invoke`] are mandatory — the streaming / channel /
 //! settings hooks ship with defaults: a not-implemented stream frame, no
-//! channels, no settings.
+//! channels, no settings. Each call arrives as one request value
+//! ([`DiscoverRequest`], [`InvokeRequest`], [`crate::ChannelRequest`]) that
+//! carries the values behind the declared settings as [`Settings`].
 
 use std::collections::HashMap;
 
@@ -12,6 +14,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::channel::ChannelHandler;
 use crate::models::{InvokeResult, PluginSetting, ServiceInfo};
+use crate::settings::Settings;
 
 /// One Bowire protocol-plugin instance. The runtime ([`crate::run`] /
 /// [`crate::run_http`]) owns the wire; you own this trait's bodies.
@@ -39,34 +42,18 @@ pub trait BowirePlugin: Send + Sync + 'static {
     /// Walk the topology of services the workbench should render in
     /// the sidebar. Called once per `(server_url, show_internal)`
     /// combination; results are cached by the workbench.
-    async fn discover(&self, server_url: &str, show_internal: bool) -> Vec<ServiceInfo>;
+    async fn discover(&self, request: DiscoverRequest) -> Vec<ServiceInfo>;
 
     /// Dispatch a unary or client-streaming call. `json_messages`
     /// carries every request body the workbench captured (one entry
     /// for unary, multiple for client-streaming). Return the result
     /// the workbench should render.
-    async fn invoke(
-        &self,
-        server_url: &str,
-        service: &str,
-        method: &str,
-        json_messages: Vec<String>,
-        show_internal: bool,
-        metadata: HashMap<String, String>,
-    ) -> InvokeResult;
+    async fn invoke(&self, request: InvokeRequest) -> InvokeResult;
 
     /// Dispatch a server-streaming or duplex call. Default emits a
     /// single not-implemented frame so the workbench fails fast
     /// instead of hanging.
-    async fn invoke_stream(
-        &self,
-        _server_url: &str,
-        _service: &str,
-        _method: &str,
-        _json_messages: Vec<String>,
-        _show_internal: bool,
-        _metadata: HashMap<String, String>,
-    ) -> BoxStream<'static, String> {
+    async fn invoke_stream(&self, _request: InvokeRequest) -> BoxStream<'static, String> {
         let msg = format!(
             r#"{{"status":"Error","response":"invoke_stream not implemented by plugin '{}'"}}"#,
             self.id()
@@ -86,8 +73,12 @@ pub trait BowirePlugin: Send + Sync + 'static {
         None
     }
 
-    /// Per-plugin settings the workbench renders in the plugin
-    /// settings dialog. Default: no settings.
+    /// The settings this plugin declares (Kuestenlogik/Bowire#693): sent in
+    /// the `initialize` reply and rendered in the workbench's Settings dialog.
+    /// The values come back with every call as the `settings` argument, and
+    /// the defaults declared here are what its accessors return for a key
+    /// nobody set. Asked again per call, so a plugin may compute them.
+    /// Default: no settings.
     fn settings(&self) -> Vec<PluginSetting> {
         Vec::new()
     }
@@ -142,5 +133,84 @@ impl Default for Capabilities {
             invoke_stream: true,
             channels: false,
         }
+    }
+}
+
+/// What the host asked `discover` for. Mirrors the `discover` params.
+#[derive(Debug, Clone, Default)]
+#[non_exhaustive]
+pub struct DiscoverRequest {
+    /// The target server the workbench points at.
+    pub server_url: String,
+    /// Whether the workbench shows internal services.
+    pub show_internal: bool,
+    /// The values behind the declared settings, as the host sent them with
+    /// this call (Kuestenlogik/Bowire#693).
+    pub settings: Settings,
+}
+
+impl DiscoverRequest {
+    /// A request for `server_url`, for driving a plugin from a test.
+    pub fn new(server_url: impl Into<String>) -> Self {
+        Self {
+            server_url: server_url.into(),
+            ..Self::default()
+        }
+    }
+
+    /// With the given setting values.
+    pub fn with_settings(mut self, settings: Settings) -> Self {
+        self.settings = settings;
+        self
+    }
+}
+
+/// What the host asked `invoke` or `invokeStream` for. Mirrors their params.
+#[derive(Debug, Clone, Default)]
+#[non_exhaustive]
+pub struct InvokeRequest {
+    /// The target server the workbench points at.
+    pub server_url: String,
+    /// Service name, as discovered.
+    pub service: String,
+    /// Method name, as discovered.
+    pub method: String,
+    /// Every request body the workbench captured: one for a unary call.
+    pub json_messages: Vec<String>,
+    /// Whether the workbench shows internal services.
+    pub show_internal: bool,
+    /// Request metadata (headers) the operator set.
+    pub metadata: HashMap<String, String>,
+    /// The values behind the declared settings, as the host sent them with
+    /// this call (Kuestenlogik/Bowire#693).
+    pub settings: Settings,
+}
+
+impl InvokeRequest {
+    /// A call to `service` / `method`, for driving a plugin from a test.
+    pub fn new(service: impl Into<String>, method: impl Into<String>) -> Self {
+        Self {
+            service: service.into(),
+            method: method.into(),
+            ..Self::default()
+        }
+    }
+
+    /// With these request bodies.
+    pub fn with_messages(mut self, json_messages: impl IntoIterator<Item = String>) -> Self {
+        self.json_messages = json_messages.into_iter().collect();
+        self
+    }
+
+    /// With these metadata entries.
+    pub fn with_metadata(mut self, metadata: HashMap<String, String>) -> Self {
+        self.metadata = metadata;
+        self
+    }
+
+    /// With the given setting values.
+    pub fn with_settings(mut self, settings: Settings) -> Self {
+        self.settings = settings;
+        self
     }
 }

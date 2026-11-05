@@ -13,8 +13,9 @@ use futures::stream::BoxStream;
 use serde_json::{json, Value};
 
 use crate::channel::{ChannelRefusal, ChannelRegistry, ChannelRequest, Notify};
-use crate::plugin::BowirePlugin;
+use crate::plugin::{BowirePlugin, DiscoverRequest, InvokeRequest};
 use crate::runtime::jsonrpc::{Request, Response};
+use crate::settings::{settings_problems, Settings};
 
 /// JSON-RPC error for a `channel.send` / `channel.close` on a channel that
 /// is gone (or never was). The host reads any error here as
@@ -72,20 +73,35 @@ pub(crate) async fn dispatch<P: BowirePlugin>(
 
     match req.method.as_str() {
         "shutdown" => DispatchResult::Shutdown(Response::ok(id, json!({}))),
-        "initialize" => DispatchResult::Reply(Response::ok(
-            id,
-            json!({
-                "id": plugin.id(),
-                "name": plugin.name(),
-                "iconSvg": plugin.icon_svg(),
-                // #416: which contract this sidecar speaks, and what it can
-                // answer. A reply without them is tolerated as legacy v1 —
-                // with a warning in the host log on every boot, which is what
-                // this runtime used to earn.
-                "protocolVersion": crate::SIDECAR_PROTOCOL_VERSION,
-                "capabilities": capabilities(plugin.as_ref()),
-            }),
-        )),
+        "initialize" => {
+            // Kuestenlogik/Bowire#693: the declarations the Settings dialog
+            // renders. A select without options would render with nothing to
+            // pick, so it fails the handshake with the reason instead.
+            let declared = plugin.settings();
+            let problems = settings_problems(&declared);
+            if !problems.is_empty() {
+                return DispatchResult::Reply(Response::err(
+                    id,
+                    -32603,
+                    format!("settings: {}", problems.join("; ")),
+                ));
+            }
+            DispatchResult::Reply(Response::ok(
+                id,
+                json!({
+                    "id": plugin.id(),
+                    "name": plugin.name(),
+                    "iconSvg": plugin.icon_svg(),
+                    "settings": declared,
+                    // #416: which contract this sidecar speaks, and what it can
+                    // answer. A reply without them is tolerated as legacy v1 —
+                    // with a warning in the host log on every boot, which is what
+                    // this runtime used to earn.
+                    "protocolVersion": crate::SIDECAR_PROTOCOL_VERSION,
+                    "capabilities": capabilities(plugin.as_ref()),
+                }),
+            ))
+        }
         // The contract's reply is the bare string. `{}` was this runtime's
         // own invention; a host using ping as a liveness probe reads it as a
         // malformed answer.
@@ -93,7 +109,13 @@ pub(crate) async fn dispatch<P: BowirePlugin>(
         "discover" => {
             let server_url = string_param(&params, "serverUrl").unwrap_or_default();
             let show_internal = bool_param(&params, "showInternalServices").unwrap_or(false);
-            let services = plugin.discover(&server_url, show_internal).await;
+            let services = plugin
+                .discover(DiscoverRequest {
+                    server_url,
+                    show_internal,
+                    settings: call_settings(plugin.as_ref(), &params),
+                })
+                .await;
             // A bare array. The host reads anything else as "no services,
             // try the next plugin" and moves on without a word, so the
             // `{"services": …}` envelope meant discovery never returned
@@ -111,14 +133,15 @@ pub(crate) async fn dispatch<P: BowirePlugin>(
             let show_internal = bool_param(&params, "showInternalServices").unwrap_or(false);
             let metadata = map_param(&params, "metadata");
             let result = plugin
-                .invoke(
-                    &server_url,
-                    &service,
-                    &method,
+                .invoke(InvokeRequest {
+                    server_url,
+                    service,
+                    method,
                     json_messages,
                     show_internal,
                     metadata,
-                )
+                    settings: call_settings(plugin.as_ref(), &params),
+                })
                 .await;
             DispatchResult::Reply(match serde_json::to_value(&result) {
                 Ok(v) => Response::ok(id, v),
@@ -139,14 +162,15 @@ pub(crate) async fn dispatch<P: BowirePlugin>(
             let metadata = map_param(&params, "metadata");
 
             let stream = plugin
-                .invoke_stream(
-                    &server_url,
-                    &service,
-                    &method,
+                .invoke_stream(InvokeRequest {
+                    server_url,
+                    service,
+                    method,
                     json_messages,
                     show_internal,
                     metadata,
-                )
+                    settings: call_settings(plugin.as_ref(), &params),
+                })
                 .await;
             DispatchResult::Stream {
                 ack: Response::ok(id, json!({ "streamId": stream_id.clone() })),
@@ -186,6 +210,13 @@ pub(crate) async fn dispatch<P: BowirePlugin>(
     }
 }
 
+/// The values the host sent with this call, backed by the declared defaults.
+/// The declarations are asked for per call rather than captured at
+/// `initialize`: a plugin is free to compute them.
+fn call_settings<P: BowirePlugin + ?Sized>(plugin: &P, params: &Value) -> Settings {
+    Settings::from_wire(params.get("settings"), &plugin.settings())
+}
+
 /// What goes into the handshake: the plugin's own report, except that
 /// `channels` cannot be claimed without a handler to route it to.
 fn capabilities<P: BowirePlugin>(plugin: &P) -> crate::plugin::Capabilities {
@@ -221,6 +252,7 @@ async fn open_channel<P: BowirePlugin>(
         method: string_param(params, "method").unwrap_or_default(),
         show_internal: bool_param(params, "showInternalServices").unwrap_or(false),
         metadata: map_param(params, "metadata"),
+        settings: call_settings(plugin, params),
     };
     let channel = match session
         .channels
@@ -309,19 +341,11 @@ mod tests {
             "Fake"
         }
 
-        async fn discover(&self, _server_url: &str, _show_internal: bool) -> Vec<ServiceInfo> {
+        async fn discover(&self, _request: DiscoverRequest) -> Vec<ServiceInfo> {
             vec![ServiceInfo::new("Echo")]
         }
 
-        async fn invoke(
-            &self,
-            _server_url: &str,
-            _service: &str,
-            _method: &str,
-            _json_messages: Vec<String>,
-            _show_internal: bool,
-            _metadata: HashMap<String, String>,
-        ) -> InvokeResult {
+        async fn invoke(&self, _request: InvokeRequest) -> InvokeResult {
             InvokeResult::default()
         }
     }
@@ -386,5 +410,125 @@ mod tests {
         let result = result_of(dispatch(Arc::new(Fake), request("ping"), &session()).await);
 
         assert_eq!(result, json!("pong"));
+    }
+
+    /// A plugin that declares settings and answers with what it read.
+    struct Configured {
+        declared: Vec<crate::models::PluginSetting>,
+    }
+
+    impl Configured {
+        fn new() -> Self {
+            Self {
+                declared: vec![
+                    crate::models::PluginSetting::new("mode", "Mode", "select")
+                        .with_default("fast")
+                        .with_options([
+                            crate::models::SettingOption::new("fast"),
+                            crate::models::SettingOption::labelled("safe", "Safe"),
+                        ]),
+                    crate::models::PluginSetting::new("ticks", "Ticks", "number").with_default(3),
+                ],
+            }
+        }
+    }
+
+    #[async_trait]
+    impl BowirePlugin for Configured {
+        fn id(&self) -> &str {
+            "configured"
+        }
+
+        fn name(&self) -> &str {
+            "Configured"
+        }
+
+        fn settings(&self) -> Vec<crate::models::PluginSetting> {
+            self.declared.clone()
+        }
+
+        async fn discover(&self, request: DiscoverRequest) -> Vec<ServiceInfo> {
+            vec![ServiceInfo::new(
+                request.settings.string("mode").unwrap_or_default(),
+            )]
+        }
+
+        async fn invoke(&self, request: InvokeRequest) -> InvokeResult {
+            InvokeResult::ok(format!(
+                "{}/{}",
+                request.settings.string("mode").unwrap_or_default(),
+                request.settings.number("ticks").unwrap_or_default()
+            ))
+        }
+    }
+
+    fn with_params(method: &str, params: Value) -> Request {
+        Request {
+            id: Some(json!(1)),
+            method: method.to_owned(),
+            params: Some(params),
+        }
+    }
+
+    /// Kuestenlogik/Bowire#693, first half: the declarations reach the host,
+    /// in its shape — key, label, type, defaultValue, options.
+    #[tokio::test]
+    async fn initialize_sends_the_declared_settings_in_the_hosts_shape() {
+        let result = result_of(
+            dispatch(
+                Arc::new(Configured::new()),
+                request("initialize"),
+                &session(),
+            )
+            .await,
+        );
+
+        assert_eq!(
+            result["settings"][0],
+            json!({
+                "key": "mode",
+                "label": "Mode",
+                "type": "select",
+                "defaultValue": "fast",
+                "options": [{"value": "fast"}, {"value": "safe", "label": "Safe"}],
+                "required": false,
+            })
+        );
+        assert_eq!(result["settings"][1]["defaultValue"], json!(3));
+    }
+
+    /// Second half: the values the host sends reach the plugin, per call; a
+    /// key nobody set reads as its declared default.
+    #[tokio::test]
+    async fn the_values_sent_with_a_call_reach_the_plugin() {
+        let plugin = Arc::new(Configured::new());
+        let set = with_params("invoke", json!({"settings": {"mode": "safe"}}));
+        let result = result_of(dispatch(plugin.clone(), set, &session()).await);
+        assert_eq!(result["response"], json!("safe/3"));
+
+        let unset = with_params("invoke", json!({}));
+        let result = result_of(dispatch(plugin.clone(), unset, &session()).await);
+        assert_eq!(result["response"], json!("fast/3"));
+
+        let discover = with_params("discover", json!({"settings": {"mode": "safe"}}));
+        let result = result_of(dispatch(plugin, discover, &session()).await);
+        assert_eq!(result[0]["name"], json!("safe"));
+    }
+
+    /// A select without options would render with nothing to pick: the
+    /// handshake fails and says which setting.
+    #[tokio::test]
+    async fn a_select_without_options_fails_the_handshake() {
+        let plugin = Configured {
+            declared: vec![crate::models::PluginSetting::new("mode", "Mode", "select")],
+        };
+        let outcome = dispatch(Arc::new(plugin), request("initialize"), &session()).await;
+        let DispatchResult::Reply(reply) = outcome else {
+            panic!("expected a plain reply");
+        };
+        let error = reply.error.expect("an error reply");
+        assert!(error
+            .message
+            .contains("select setting 'mode' declares no options"));
     }
 }

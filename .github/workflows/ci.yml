@@ -108,6 +108,34 @@ jobs:
           echo "$out"
           echo "$out" | grep -q "DemoService"
 
+      # Settings end to end (#9): the declaration reaches the Settings
+      # dialog's endpoint with the options a select needs, and a value set in
+      # a workspace reaches the plugin on the next call, then falls back to
+      # the default once cleared. The CLI has no workspace, so this goes
+      # through the workbench as well.
+      - name: Settings through the real host
+        run: |
+          set -euo pipefail
+          bowire --plugin-dir "$PWD/plugins" --no-browser --port 0 > settings-host.log 2>&1 &
+          host=$!
+          trap 'kill $host 2>/dev/null || true' EXIT
+          banner=$(timeout 60 grep -m1 "Bowire is running at" <(tail -n +1 -f settings-host.log))
+          url=$(echo "$banner" | grep -o 'http://[^ ]*' | sed 's:/*$::')
+          mkdir -p "$RUNNER_TEMP/ws"
+          q="workspaceId=e2e&storageRoot=$RUNNER_TEMP/ws&serverUrl=echo-rs@http://localhost:1"
+
+          curl -sf "$url/api/protocols?$q"             | jq -e '.[] | select(.id == "echo-rs") | .settings[] | select(.key == "transform")
+                     | .type == "select" and ([.options[].value] == ["none","upper","lower"])'
+
+          echo_hi() {
+            curl -sf -X POST "$url/api/invoke?$q" -H 'content-type: application/json'               -d '{"protocol":"echo-rs","service":"DemoService","method":"Echo","messages":["{\"message\":\"hi\"}"]}'               | jq -r .response
+          }
+          echo_hi | grep -q '"message":"hi"'
+          curl -sf -X PUT "$url/api/plugins/settings/echo-rs/transform?$q"             -H 'content-type: application/json' -d '{"value":"upper"}' > /dev/null
+          echo_hi | grep -q '"MESSAGE":"HI"'
+          curl -sf -X PUT "$url/api/plugins/settings/echo-rs/transform?$q"             -H 'content-type: application/json' -d '{"value":null}' > /dev/null
+          echo_hi | grep -q '"message":"hi"'
+
       # A duplex method end to end (#5). The CLI subcommands have no duplex
       # mode — `bowire call --stream` drives invokeStream, not openChannel —
       # so this goes through the workbench's channel endpoints, which call

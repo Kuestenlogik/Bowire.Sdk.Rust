@@ -13,9 +13,8 @@ cargo add bowire-plugin --features http
 ## Write a plugin
 
 ```rust
-use std::collections::HashMap;
 use bowire_plugin::{
-    run, BowirePlugin, InvokeResult, MethodInfo, ServiceInfo,
+    run, BowirePlugin, DiscoverRequest, InvokeRequest, InvokeResult, MethodInfo, ServiceInfo,
 };
 
 struct Echo;
@@ -25,17 +24,13 @@ impl BowirePlugin for Echo {
     fn id(&self) -> &str { "echo" }
     fn name(&self) -> &str { "Echo" }
 
-    async fn discover(&self, _server_url: &str, _show_internal: bool) -> Vec<ServiceInfo> {
+    async fn discover(&self, _request: DiscoverRequest) -> Vec<ServiceInfo> {
         vec![ServiceInfo::new("DemoService")
             .with_methods([MethodInfo::unary("Echo")])]
     }
 
-    async fn invoke(
-        &self, _server_url: &str, _service: &str, _method: &str,
-        json_messages: Vec<String>, _show_internal: bool,
-        _metadata: HashMap<String, String>,
-    ) -> InvokeResult {
-        let payload = json_messages.first().cloned().unwrap_or_default();
+    async fn invoke(&self, request: InvokeRequest) -> InvokeResult {
+        let payload = request.json_messages.first().cloned().unwrap_or_default();
         InvokeResult::ok(format!(r#"{{"echoed":{payload}}}"#))
     }
 }
@@ -47,6 +42,46 @@ async fn main() {
 ```
 
 That's it. The SDK drives the JSON-RPC contract (`initialize` / `ping` / `discover` / `invoke` / `invokeStream` / `openChannel` / `channel.send` / `channel.close` / `shutdown`) over NDJSON on stdin/stdout. The Bowire host spawns your binary as a subprocess; your plugin code never touches the wire.
+
+## Settings
+
+A plugin declares its settings once. Bowire renders them in its Settings
+dialog, in the plugin's own section, and sends the values back with every
+call, so a changed setting takes effect without a restart.
+
+**Declare** them in `settings()`. `type` is `"bool"`, `"string"`, `"number"`
+or `"select"`, and a `select` needs `options`. One without them fails the
+`initialize` handshake, naming the setting.
+
+```rust
+use bowire_plugin::{PluginSetting, SettingOption};
+
+fn settings(&self) -> Vec<PluginSetting> {
+    vec![
+        PluginSetting::new("probeWindow", "Probe window", "number").with_default(5),
+        PluginSetting::new("mode", "Mode", "select")
+            .with_default("fast")
+            .with_options([SettingOption::new("fast"), SettingOption::labelled("safe", "Safe")]),
+    ]
+}
+```
+
+**Read** them from the request's `settings`: `DiscoverRequest`,
+`InvokeRequest` and `ChannelRequest` all carry one.
+
+```rust
+async fn invoke(&self, request: InvokeRequest) -> InvokeResult {
+    let window = request.settings.number("probeWindow"); // Some(5.0) until somebody sets it
+    let mode = request.settings.string("mode");          // Some("fast") by default
+    // …
+}
+```
+
+- Only keys somebody set travel. An absent key, or a value that does not
+  parse as its type, reads as the declared default.
+- `bool` accepts `true` / `false` in any case, and `number` a finite decimal.
+- `has(key)` and `raw(key)` say whether the host sent a value and what text
+  it was.
 
 ## Duplex channels
 
@@ -143,10 +178,9 @@ BowirePlugin
 ├── id() -> &str                                          // required
 ├── name() -> &str                                        // required
 ├── icon_svg() -> &str                                    // default: "<svg/>"
-├── async discover(server_url, show_internal)             // required
-├── async invoke(server_url, service, method,             // required
-│                json_messages, show_internal, metadata)
-├── async invoke_stream(...) -> BoxStream<String>         // default: NotImplemented
+├── async discover(DiscoverRequest)                       // required
+├── async invoke(InvokeRequest) -> InvokeResult           // required
+├── async invoke_stream(InvokeRequest) -> BoxStream       // default: NotImplemented
 ├── channels() -> Option<&dyn ChannelHandler>             // default: None (no duplex)
 ├── settings() -> Vec<PluginSetting>                      // default: []
 └── capabilities() -> Capabilities                        // default: derived
@@ -154,6 +188,20 @@ BowirePlugin
 ChannelHandler
 └── async open_channel(request, channel) -> Result<(), String>
 ```
+
+## Breaking changes
+
+Pre-1.0, changes land in one cut. Since 0.2.0:
+
+- `discover`, `invoke` and `invoke_stream` take one request value,
+  `DiscoverRequest` or `InvokeRequest`, instead of positional arguments.
+  The request carries the call's setting values, and a field added later
+  does not break an implementation.
+- `PluginSetting` has the host's shape: `key`, `label`, `type_name`,
+  `default_value` (any JSON value), `description`, `options` (`SettingOption`
+  with `value` and `label`). The old `id` / `name` / `default` fields never
+  reached the host.
+- `ChannelRequest` gains `settings`.
 
 ## Contract reference
 

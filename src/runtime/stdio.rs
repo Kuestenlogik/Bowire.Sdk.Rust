@@ -20,15 +20,14 @@ use crate::runtime::jsonrpc::{Notification, Request, Response};
 /// `shutdown` request, non-zero on an unrecoverable I/O error.
 ///
 /// ```no_run
-/// # use bowire_plugin::{run, BowirePlugin, InvokeResult, ServiceInfo};
+/// # use bowire_plugin::{run, BowirePlugin, DiscoverRequest, InvokeRequest, InvokeResult, ServiceInfo};
 /// # struct Echo;
 /// # #[async_trait::async_trait]
 /// # impl BowirePlugin for Echo {
 /// #     fn id(&self) -> &str { "echo" }
 /// #     fn name(&self) -> &str { "Echo" }
-/// #     async fn discover(&self, _: &str, _: bool) -> Vec<ServiceInfo> { vec![] }
-/// #     async fn invoke(&self, _: &str, _: &str, _: &str, _: Vec<String>, _: bool,
-/// #                     _: std::collections::HashMap<String, String>) -> InvokeResult {
+/// #     async fn discover(&self, _: DiscoverRequest) -> Vec<ServiceInfo> { vec![] }
+/// #     async fn invoke(&self, _: InvokeRequest) -> InvokeResult {
 /// #         InvokeResult::ok("{}")
 /// #     }
 /// # }

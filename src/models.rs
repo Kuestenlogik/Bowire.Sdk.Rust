@@ -280,24 +280,106 @@ impl InvokeResult {
     }
 }
 
-/// One configurable setting the plugin declares; the workbench shows
-/// them in the per-plugin Settings dialog. Most plugins return an
-/// empty vec from [`crate::BowirePlugin::settings`].
-#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+/// One choice of a `select` setting: `value` is what the plugin reads back,
+/// `label` what the Settings dialog shows (the value when absent).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SettingOption {
+    /// What the host sends back when the operator picks it.
+    pub value: String,
+    /// What the dialog shows.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub label: Option<String>,
+}
+
+impl SettingOption {
+    /// A choice shown as its value.
+    pub fn new(value: impl Into<String>) -> Self {
+        Self {
+            value: value.into(),
+            label: None,
+        }
+    }
+
+    /// A choice with a label of its own.
+    pub fn labelled(value: impl Into<String>, label: impl Into<String>) -> Self {
+        Self {
+            value: value.into(),
+            label: Some(label.into()),
+        }
+    }
+}
+
+/// A setting the plugin declares in its `initialize` reply
+/// (Kuestenlogik/Bowire#693). The host renders it in the plugin's section of
+/// the workbench's Settings dialog and sends the value back on every call;
+/// read it through [`crate::Settings`].
+///
+/// `type` is the host's vocabulary: `"bool"`, `"string"`, `"number"` or
+/// `"select"`. A `select` needs `options`; one without them fails the
+/// handshake, naming the setting.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct PluginSetting {
-    /// Setting id (must be stable; the host stores values keyed on it).
-    pub id: String,
-    /// Display name shown next to the input.
-    pub name: String,
-    /// Description rendered as helper text.
-    pub description: String,
-    /// Type marker — `string` / `int` / `bool` / `select` (with `options`).
+    /// Stable key the host stores the value under.
+    pub key: String,
+    /// What the operator reads.
+    pub label: String,
+    /// `"bool"`, `"string"`, `"number"` or `"select"`.
     #[serde(rename = "type")]
     pub type_name: String,
-    /// Default value as a string (the host parses by `type_name`).
-    pub default: String,
-    /// For `type=select`: the choice list.
-    #[serde(skip_serializing_if = "Vec::is_empty")]
-    pub options: Vec<String>,
+    /// What the accessors return while nobody has set a value.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub default_value: Option<serde_json::Value>,
+    /// Shown below the label.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub description: Option<String>,
+    /// The choices of a `select`.
+    #[serde(skip_serializing_if = "Vec::is_empty", default)]
+    pub options: Vec<SettingOption>,
+    /// Sent along for parity with the other SDKs; the host has no such concept yet.
+    #[serde(default)]
+    pub required: bool,
+}
+
+impl PluginSetting {
+    /// A setting of `type_name` (`"bool"`, `"string"`, `"number"`, `"select"`).
+    pub fn new(
+        key: impl Into<String>,
+        label: impl Into<String>,
+        type_name: impl Into<String>,
+    ) -> Self {
+        Self {
+            key: key.into(),
+            label: label.into(),
+            type_name: type_name.into(),
+            default_value: None,
+            description: None,
+            options: Vec::new(),
+            required: false,
+        }
+    }
+
+    /// The value the accessors return while nobody has set one.
+    pub fn with_default(mut self, value: impl Into<serde_json::Value>) -> Self {
+        self.default_value = Some(value.into());
+        self
+    }
+
+    /// Help text below the label.
+    pub fn with_description(mut self, description: impl Into<String>) -> Self {
+        self.description = Some(description.into());
+        self
+    }
+
+    /// Append choices for a `select`.
+    pub fn with_options(mut self, options: impl IntoIterator<Item = SettingOption>) -> Self {
+        self.options.extend(options);
+        self
+    }
+
+    /// Mark the setting required.
+    pub fn required(mut self) -> Self {
+        self.required = true;
+        self
+    }
 }

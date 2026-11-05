@@ -39,6 +39,9 @@ pub struct ChannelRequest {
     pub show_internal: bool,
     /// Request metadata (headers) the operator set.
     pub metadata: HashMap<String, String>,
+    /// The values behind the declared settings, as the host sent them with
+    /// this `openChannel` (Kuestenlogik/Bowire#693).
+    pub settings: crate::settings::Settings,
 }
 
 /// Opens duplex channels. Implement it next to [`crate::BowirePlugin`] and

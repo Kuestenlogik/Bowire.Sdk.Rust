@@ -9,7 +9,9 @@
 //! ## Quickstart
 //!
 //! ```no_run
-//! use bowire_plugin::{run, BowirePlugin, InvokeResult, MethodInfo, ServiceInfo};
+//! use bowire_plugin::{
+//!     run, BowirePlugin, DiscoverRequest, InvokeRequest, InvokeResult, MethodInfo, ServiceInfo,
+//! };
 //!
 //! struct Echo;
 //!
@@ -18,21 +20,14 @@
 //!     fn id(&self) -> &str { "echo" }
 //!     fn name(&self) -> &str { "Echo" }
 //!
-//!     async fn discover(&self, _server_url: &str, _show_internal: bool)
-//!         -> Vec<ServiceInfo>
-//!     {
+//!     async fn discover(&self, _request: DiscoverRequest) -> Vec<ServiceInfo> {
 //!         vec![ServiceInfo::new("DemoService").with_methods([
 //!             MethodInfo::unary("Echo"),
 //!         ])]
 //!     }
 //!
-//!     async fn invoke(
-//!         &self, _server_url: &str, _service: &str, _method: &str,
-//!         json_messages: Vec<String>, _show_internal: bool,
-//!         _metadata: std::collections::HashMap<String, String>,
-//!     ) -> InvokeResult
-//!     {
-//!         let payload = json_messages.first().cloned().unwrap_or_else(|| "{}".into());
+//!     async fn invoke(&self, request: InvokeRequest) -> InvokeResult {
+//!         let payload = request.json_messages.first().cloned().unwrap_or_else(|| "{}".into());
 //!         InvokeResult::ok(format!("{{\"echoed\":{}}}", payload))
 //!     }
 //! }
@@ -73,13 +68,16 @@ mod error;
 mod models;
 mod plugin;
 mod runtime;
+mod settings;
 
 pub use channel::{Channel, ChannelHandler, ChannelReceiver, ChannelRequest, ChannelSender};
 pub use error::{Error, Result};
 pub use models::{
     FieldInfo, InvokeResult, MessageInfo, MethodInfo, MethodType, PluginSetting, ServiceInfo,
+    SettingOption,
 };
-pub use plugin::{BowirePlugin, Capabilities};
+pub use plugin::{BowirePlugin, Capabilities, DiscoverRequest, InvokeRequest};
+pub use settings::Settings;
 
 /// The sidecar wire-contract version this SDK speaks (#416). The host
 /// accepts a sidecar inside its supported range and refuses one outside it
