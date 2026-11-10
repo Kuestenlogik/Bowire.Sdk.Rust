@@ -88,4 +88,4 @@ pub const SIDECAR_PROTOCOL_VERSION: u32 = 1;
 pub use runtime::stdio::run;
 
 #[cfg(feature = "http")]
-pub use runtime::http::run_http;
+pub use runtime::http::{run_http, serve_http, shutdown_signal};

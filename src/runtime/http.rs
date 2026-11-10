@@ -12,6 +12,7 @@
 //! For the default subprocess-spawn case stick with [`super::stdio`].
 
 use std::convert::Infallible;
+use std::future::Future;
 use std::net::SocketAddr;
 use std::sync::Arc;
 
@@ -23,7 +24,8 @@ use axum::routing::post;
 use axum::{Json, Router};
 use futures::stream::StreamExt;
 use serde_json::{json, Value};
-use tokio::sync::broadcast;
+use tokio::net::TcpListener;
+use tokio::sync::{broadcast, watch};
 use tokio_stream::wrappers::BroadcastStream;
 
 use crate::plugin::BowirePlugin;
@@ -37,8 +39,11 @@ use crate::runtime::jsonrpc::{Notification, Request};
 const NOTIFICATION_CHANNEL_CAPACITY: usize = 1024;
 
 /// Drive `plugin` over HTTP/SSE on `host:port`. Returns once the
-/// server shuts down (e.g. Ctrl-C signal). Errors during bind /
-/// serve surface as the returned `std::io::Error`.
+/// process is asked to stop (Ctrl-C, or SIGTERM on Unix). Errors during
+/// bind / serve surface as the returned `std::io::Error`.
+///
+/// To choose the port yourself, e.g. port 0 and then report the one the
+/// OS assigned, bind a [`TcpListener`] and use [`serve_http`].
 ///
 /// ```no_run
 /// # use bowire_plugin::{run_http, BowirePlugin, DiscoverRequest, InvokeRequest, InvokeResult, ServiceInfo};
@@ -58,6 +63,49 @@ const NOTIFICATION_CHANNEL_CAPACITY: usize = 1024;
 /// }
 /// ```
 pub async fn run_http<P: BowirePlugin>(plugin: P, host: &str, port: u16) -> std::io::Result<()> {
+    let addr: SocketAddr =
+        format!("{host}:{port}")
+            .parse()
+            .map_err(|e: std::net::AddrParseError| {
+                std::io::Error::new(std::io::ErrorKind::InvalidInput, e)
+            })?;
+    let listener = TcpListener::bind(addr).await?;
+    serve_http(plugin, listener, shutdown_signal()).await
+}
+
+/// Drive `plugin` over HTTP/SSE on a listener the caller bound, until
+/// `shutdown` completes. [`run_http`] is this with a listener on
+/// `host:port` and the process's stop signals.
+///
+/// A host keeps its SSE `GET` open for as long as it uses the sidecar, so
+/// on `shutdown` the runtime ends those streams itself. Waiting for the
+/// host to hang up would keep a sidecar that was told to stop running for
+/// as long as any workbench stays connected.
+///
+/// ```no_run
+/// # use bowire_plugin::{serve_http, BowirePlugin, DiscoverRequest, InvokeRequest, InvokeResult, ServiceInfo};
+/// # struct Echo;
+/// # #[async_trait::async_trait]
+/// # impl BowirePlugin for Echo {
+/// #     fn id(&self) -> &str { "echo" }
+/// #     fn name(&self) -> &str { "Echo" }
+/// #     async fn discover(&self, _: DiscoverRequest) -> Vec<ServiceInfo> { vec![] }
+/// #     async fn invoke(&self, _: InvokeRequest) -> InvokeResult {
+/// #         InvokeResult::ok("{}")
+/// #     }
+/// # }
+/// #[tokio::main]
+/// async fn main() -> std::io::Result<()> {
+///     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await?;
+///     println!("listening on http://{}/", listener.local_addr()?);
+///     serve_http(Echo, listener, bowire_plugin::shutdown_signal()).await
+/// }
+/// ```
+pub async fn serve_http<P, F>(plugin: P, listener: TcpListener, shutdown: F) -> std::io::Result<()>
+where
+    P: BowirePlugin,
+    F: Future<Output = ()> + Send + 'static,
+{
     let plugin = Arc::new(plugin);
     let (notification_tx, _) = broadcast::channel::<Notification>(NOTIFICATION_CHANNEL_CAPACITY);
 
@@ -67,39 +115,59 @@ pub async fn run_http<P: BowirePlugin>(plugin: P, host: &str, port: u16) -> std:
             let _ = notifications.send(n);
         })))
     };
+    let (stopping_tx, stopping) = watch::channel(false);
     let state = HttpState {
         plugin,
         notifications: notification_tx,
         session,
+        stopping,
     };
 
     let app = Router::new()
         .route("/", post(post_rpc).get(sse_subscribe))
         .with_state(state);
 
-    let addr: SocketAddr =
-        format!("{host}:{port}")
-            .parse()
-            .map_err(|e: std::net::AddrParseError| {
-                std::io::Error::new(std::io::ErrorKind::InvalidInput, e)
-            })?;
-
-    let listener = tokio::net::TcpListener::bind(addr).await?;
     axum::serve(listener, app)
-        .with_graceful_shutdown(shutdown_signal())
+        .with_graceful_shutdown(async move {
+            shutdown.await;
+            // Ends every open SSE stream, so graceful shutdown has no
+            // connection left to wait for.
+            let _ = stopping_tx.send(true);
+        })
         .await
 }
 
-/// Listen for SIGTERM / Ctrl-C so a hosted sidecar shuts down
-/// gracefully when the container manager sends it the signal.
-async fn shutdown_signal() {
-    let _ = tokio::signal::ctrl_c().await;
+/// Completes on Ctrl-C, and on Unix also on SIGTERM: what a container
+/// manager or a test harness sends a hosted sidecar it wants gone. The
+/// signals [`run_http`] stops on; hand it to [`serve_http`] for the same.
+pub async fn shutdown_signal() {
+    #[cfg(unix)]
+    {
+        use tokio::signal::unix::{signal, SignalKind};
+        match signal(SignalKind::terminate()) {
+            Ok(mut term) => {
+                tokio::select! {
+                    _ = tokio::signal::ctrl_c() => {}
+                    _ = term.recv() => {}
+                }
+            }
+            Err(_) => {
+                let _ = tokio::signal::ctrl_c().await;
+            }
+        }
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = tokio::signal::ctrl_c().await;
+    }
 }
 
 struct HttpState<P: BowirePlugin> {
     plugin: Arc<P>,
     notifications: broadcast::Sender<Notification>,
     session: Arc<Session>,
+    /// Turns `true` once the runtime shuts down; every SSE stream ends on it.
+    stopping: watch::Receiver<bool>,
 }
 
 // Manual `Clone` impl — `#[derive(Clone)]` would add an unwanted
@@ -112,6 +180,7 @@ impl<P: BowirePlugin> Clone for HttpState<P> {
             plugin: self.plugin.clone(),
             notifications: self.notifications.clone(),
             session: self.session.clone(),
+            stopping: self.stopping.clone(),
         }
     }
 }
@@ -173,11 +242,16 @@ async fn post_rpc<P: BowirePlugin>(
 /// notification gets serialised as `data: <json>\n\n`.
 async fn sse_subscribe<P: BowirePlugin>(State(state): State<HttpState<P>>) -> AxumResponse {
     let rx = state.notifications.subscribe();
-    let body_stream = BroadcastStream::new(rx).filter_map(|item| async move {
-        let n = item.ok()?;
-        let payload = serde_json::to_string(&n).ok()?;
-        Some(Ok::<_, Infallible>(format!("data: {payload}\n\n")))
-    });
+    let mut stopping = state.stopping.clone();
+    let body_stream = BroadcastStream::new(rx)
+        .filter_map(|item| async move {
+            let n = item.ok()?;
+            let payload = serde_json::to_string(&n).ok()?;
+            Some(Ok::<_, Infallible>(format!("data: {payload}\n\n")))
+        })
+        .take_until(async move {
+            let _ = stopping.wait_for(|stopping| *stopping).await;
+        });
     let body = Body::from_stream(body_stream);
 
     let mut resp = AxumResponse::new(body);
@@ -190,4 +264,141 @@ async fn sse_subscribe<P: BowirePlugin>(State(state): State<HttpState<P>>) -> Ax
     resp.headers_mut()
         .insert(header::CONNECTION, HeaderValue::from_static("keep-alive"));
     resp
+}
+
+#[cfg(test)]
+mod tests {
+    //! The runtime over a real socket, with a raw HTTP/1.1 client: what a
+    //! host sees on the wire, without a host.
+
+    use super::*;
+    use crate::{DiscoverRequest, InvokeRequest, InvokeResult, ServiceInfo};
+    use futures::stream::{self, BoxStream};
+    use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader};
+    use tokio::net::TcpStream;
+    use tokio::sync::oneshot;
+    use tokio::task::JoinHandle;
+
+    struct Ticker;
+
+    #[async_trait::async_trait]
+    impl BowirePlugin for Ticker {
+        fn id(&self) -> &str {
+            "ticker"
+        }
+        fn name(&self) -> &str {
+            "Ticker"
+        }
+        async fn discover(&self, _: DiscoverRequest) -> Vec<ServiceInfo> {
+            vec![]
+        }
+        async fn invoke(&self, _: InvokeRequest) -> InvokeResult {
+            InvokeResult::ok("{}")
+        }
+        async fn invoke_stream(&self, _: InvokeRequest) -> BoxStream<'static, String> {
+            Box::pin(stream::iter(["1", "2"].map(String::from)))
+        }
+    }
+
+    struct Server {
+        addr: SocketAddr,
+        stop: oneshot::Sender<()>,
+        served: JoinHandle<std::io::Result<()>>,
+    }
+
+    async fn start() -> Server {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let (stop, stopped) = oneshot::channel::<()>();
+        let served = tokio::spawn(serve_http(Ticker, listener, async {
+            let _ = stopped.await;
+        }));
+        Server { addr, stop, served }
+    }
+
+    /// Opens the SSE `GET` and returns once its response headers are in,
+    /// which is when the runtime has subscribed this client.
+    async fn subscribe(addr: SocketAddr) -> BufReader<TcpStream> {
+        let mut sse = TcpStream::connect(addr).await.unwrap();
+        sse.write_all(b"GET / HTTP/1.1\r\nhost: x\r\naccept: text/event-stream\r\n\r\n")
+            .await
+            .unwrap();
+        let mut sse = BufReader::new(sse);
+        let mut line = String::new();
+        loop {
+            line.clear();
+            sse.read_line(&mut line).await.unwrap();
+            if line == "\r\n" {
+                return sse;
+            }
+        }
+    }
+
+    async fn post(addr: SocketAddr, body: &str) -> String {
+        let mut conn = TcpStream::connect(addr).await.unwrap();
+        let req = format!(
+            "POST / HTTP/1.1\r\nhost: x\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{body}",
+            body.len()
+        );
+        conn.write_all(req.as_bytes()).await.unwrap();
+        let mut reply = String::new();
+        conn.read_to_string(&mut reply).await.unwrap();
+        reply
+    }
+
+    /// Reads SSE `data:` lines (chunk framing and all) until one contains
+    /// `needle`.
+    async fn read_until(sse: &mut BufReader<TcpStream>, needle: &str) -> Vec<String> {
+        let mut seen = Vec::new();
+        let mut line = String::new();
+        loop {
+            line.clear();
+            assert!(
+                sse.read_line(&mut line).await.unwrap() > 0,
+                "the stream ended before {needle}; saw {seen:?}"
+            );
+            if line.starts_with("data: ") {
+                seen.push(line.trim_end().to_string());
+                if line.contains(needle) {
+                    return seen;
+                }
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn a_server_stream_arrives_over_sse_and_ends() {
+        let server = start().await;
+        let mut sse = subscribe(server.addr).await;
+
+        let ack = post(
+            server.addr,
+            r#"{"jsonrpc":"2.0","id":7,"method":"invokeStream","params":{"streamId":"s1"}}"#,
+        )
+        .await;
+        assert!(ack.contains(r#""streamId":"s1""#), "{ack}");
+
+        let seen = read_until(&mut sse, "$/stream/end").await;
+        assert_eq!(seen.len(), 3, "{seen:?}");
+        assert!(seen[0].contains(r#""message":"1""#), "{seen:?}");
+        assert!(seen[1].contains(r#""message":"2""#), "{seen:?}");
+
+        let _ = server.stop.send(());
+        server.served.await.unwrap().unwrap();
+    }
+
+    /// A host holds its SSE `GET` open for as long as it uses the sidecar.
+    /// Stopping used to wait for that connection to close, so a sidecar
+    /// told to stop kept running while any workbench was connected.
+    #[tokio::test]
+    async fn stopping_ends_the_open_sse_streams_and_returns() {
+        let server = start().await;
+        let mut sse = subscribe(server.addr).await;
+
+        let _ = server.stop.send(());
+        server.served.await.unwrap().unwrap();
+
+        let mut rest = Vec::new();
+        sse.read_to_end(&mut rest).await.unwrap();
+    }
 }
