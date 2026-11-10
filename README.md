@@ -168,6 +168,14 @@ echo '{"jsonrpc":"2.0","id":1,"method":"discover","params":{"serverUrl":""}}' \
   | cargo run --example echo
 ```
 
+Over HTTP/SSE it runs on its own and prints the address it listens on:
+
+```bash
+cargo run --features http --example echo -- --http 127.0.0.1:0
+```
+
+`scripts/e2e.sh stdio|http <echo-binary>` installs the example into a real Bowire host either way and drives discovery, settings, a server stream and a duplex channel through it. CI runs both.
+
 ## Ship to Bowire
 
 Build a release binary, drop it next to `sidecar.json`, zip both, install:
@@ -191,7 +199,7 @@ The host extracts into `~/.bowire/plugins/<packageId>/`, reads `sidecar.json`, a
 | Transport | Feature flag | Entry point |
 |---|---|---|
 | stdio (default) | always on | `run(plugin)` |
-| HTTP / SSE      | `http`     | `run_http(plugin, host, port)` |
+| HTTP / SSE      | `http`     | `run_http(plugin, host, port)`, or `serve_http(plugin, listener, shutdown)` |
 
 stdio is what the host spawns as a subprocess (cheap, no extra deps). HTTP/SSE fits hosted / multi-tenant deployments where one sidecar serves many workbenches — `POST /` lands JSON-RPC requests, `GET /` is a long-lived SSE stream the runtime pushes server notifications onto. Both runtimes share the same JSON-RPC dispatcher, so plugin code never knows which wire it's running over.
 
@@ -205,7 +213,15 @@ async fn main() -> std::io::Result<()> {
 }
 ```
 
-Then point `sidecar.json` at `"transport": "http"` + `"url": "http://127.0.0.1:8770"` and the Bowire host bridges it the same way it bridges stdio sidecars.
+Then point `sidecar.json` at `"transport": "http"` + `"url": "http://127.0.0.1:8770"` and the Bowire host bridges it the same way it bridges stdio sidecars. The host neither starts nor stops an http sidecar; it connects to one that is running.
+
+`run_http` stops on Ctrl-C, and on Unix also on SIGTERM. It ends the SSE streams that hosts hold open, so a sidecar told to stop does not wait for every workbench to hang up. To bind the listener yourself, for example on port 0 so the OS picks a free port, use `serve_http` with the stop signal of your choice. `shutdown_signal()` is the one `run_http` uses:
+
+```rust
+let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await?;
+println!("listening on http://{}/", listener.local_addr()?);
+bowire_plugin::serve_http(MyPlugin::default(), listener, bowire_plugin::shutdown_signal()).await
+```
 
 ## Trait surface
 

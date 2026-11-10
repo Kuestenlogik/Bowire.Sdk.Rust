@@ -67,12 +67,19 @@ jobs:
   # wrong — a discover reply the host reads as "no services", a ping reply it
   # reads as malformed — were invisible to a suite that only ever talked to
   # itself. This job does what an operator does: install the published Bowire
-  # CLI, install the example as a sidecar plugin, ask it to discover.
-  # `bowire discover` exits 0 only when a plugin actually returned a service,
-  # so the exit code is the assertion.
+  # CLI, install the example as a sidecar plugin, and use it through the CLI
+  # and the workbench — discover, settings, a server stream, a duplex channel
+  # (scripts/e2e.sh). Once per transport: over stdio the host spawns the
+  # sidecar; over http (#12) it runs on its own, the host POSTs to it and
+  # reads its notifications off one SSE stream, and it has to stop when told
+  # to while the host is still connected.
   e2e:
-    name: e2e against Bowire
+    name: e2e against Bowire (${{ matrix.transport }})
     runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        transport: [stdio, http]
     steps:
       - uses: actions/checkout@v4
 
@@ -86,102 +93,8 @@ jobs:
       - name: Install the Bowire CLI
         run: dotnet tool install --global Kuestenlogik.Bowire.Tool
 
-      # The zip's root carries sidecar.json next to the binary its
-      # `executable` names — that is what marks the archive as a sidecar
-      # plugin and what the host spawns.
-      - name: Package the example as a sidecar zip
-        run: |
-          cargo build --release --example echo
-          mkdir -p stage
-          cp target/release/examples/echo stage/echo
-          cp examples/echo/sidecar.json stage/
-          cd stage && zip -r ../echo-rs.zip . && cd ..
-          unzip -l echo-rs.zip
+      - name: Build the example
+        run: cargo build --release --example echo ${{ matrix.transport == 'http' && '--features http' || '' }}
 
-      - name: Install it as a plugin
-        run: |
-          bowire --plugin-dir "$PWD/plugins" plugin install --file echo-rs.zip
-          bowire --plugin-dir "$PWD/plugins" plugin list --verbose
-
-      - name: Discover through the real host
-        run: |
-          out=$(bowire --plugin-dir "$PWD/plugins" discover --url "echo-rs@http://localhost:1")
-          echo "$out"
-          echo "$out" | grep -q "DemoService"
-
-      # Settings end to end (#9): the declaration reaches the Settings
-      # dialog's endpoint with the options a select needs, and a value set in
-      # a workspace reaches the plugin on the next call, then falls back to
-      # the default once cleared. The CLI has no workspace, so this goes
-      # through the workbench as well.
-      - name: Settings through the real host
-        run: |
-          set -euo pipefail
-          bowire --plugin-dir "$PWD/plugins" --no-browser --port 0 > settings-host.log 2>&1 &
-          host=$!
-          trap 'kill $host 2>/dev/null || true' EXIT
-          banner=$(timeout 60 grep -m1 "Bowire is running at" <(tail -n +1 -f settings-host.log))
-          url=$(echo "$banner" | grep -o 'http://[^ ]*' | sed 's:/*$::')
-          mkdir -p "$RUNNER_TEMP/ws"
-          q="workspaceId=e2e&storageRoot=$RUNNER_TEMP/ws&serverUrl=echo-rs@http://localhost:1"
-
-          curl -sf "$url/api/protocols?$q"             | jq -e '.[] | select(.id == "echo-rs") | .settings[] | select(.key == "transform")
-                     | .type == "select" and ([.options[].value] == ["none","upper","lower"])'
-
-          echo_hi() {
-            curl -sf -X POST "$url/api/invoke?$q" -H 'content-type: application/json'               -d '{"protocol":"echo-rs","service":"DemoService","method":"Echo","messages":["{\"message\":\"hi\"}"]}'               | jq -r .response
-          }
-          echo_hi | grep -q '"message":"hi"'
-          curl -sf -X PUT "$url/api/plugins/settings/echo-rs/transform?$q"             -H 'content-type: application/json' -d '{"value":"upper"}' > /dev/null
-          echo_hi | grep -q '"MESSAGE":"HI"'
-          curl -sf -X PUT "$url/api/plugins/settings/echo-rs/transform?$q"             -H 'content-type: application/json' -d '{"value":null}' > /dev/null
-          echo_hi | grep -q '"message":"hi"'
-
-          # The hand-entry form the example declares (Kuestenlogik/Bowire#1003).
-          # A host before 2.11 has no ManualEntry service (404): a note, not a
-          # failure, until the released tool is 2.11.
-          status=$(curl -s -o forms.json -w '%{http_code}' "$url/api/v1/manual-entry-forms?pageSize=200")
-          if [ "$status" = "404" ]; then
-            echo "manual entry: skipped, this host predates Bowire 2.11"
-          else
-            jq -e '.forms[] | select(.protocol == "echo-rs")
-                   | [.callKinds[] | "\(.id):\(.methodType)"] == ["echo:Unary","chat:Duplex"]' forms.json
-          fi
-
-      # A duplex method end to end (#5). The CLI subcommands have no duplex
-      # mode — `bowire call --stream` drives invokeStream, not openChannel —
-      # so this goes through the workbench's channel endpoints, which call
-      # the host's SidecarChannel exactly as the browser UI does: open, read
-      # the SSE stream, send twice, close. The stream ending with
-      # `event: done` is the host having received `$/channel/closed`.
-      # Every wait is on a signal: the banner line that carries the bound
-      # URL, and the SSE request returning when the host ends the stream.
-      - name: Duplex channel through the real host
-        run: |
-          set -euo pipefail
-          bowire --plugin-dir "$PWD/plugins" --no-browser --port 0 > host.log 2>&1 &
-          host=$!
-          trap 'kill $host 2>/dev/null || true' EXIT
-          banner=$(timeout 60 grep -m1 "Bowire is running at" <(tail -n +1 -f host.log))
-          url=$(echo "$banner" | grep -o 'http://[^ ]*' | sed 's:/*$::')
-          echo "host at $url"
-
-          open=$(curl -sf -X POST "$url/api/channel/open?serverUrl=echo-rs@http://localhost:1" \
-            -H 'content-type: application/json' \
-            -d '{"service":"DemoService","method":"Chat","protocol":"echo-rs"}')
-          echo "$open"
-          id=$(echo "$open" | jq -er .channelId)
-
-          curl -sfN "$url/api/channel/$id/responses" > responses.txt &
-          sse=$!
-          for word in one two; do
-            curl -sf -X POST "$url/api/channel/$id/send" -H 'content-type: application/json' \
-              -d "{\"message\":\"{\\\"message\\\":\\\"$word\\\"}\"}" | jq -e '.sent == true'
-          done
-          curl -sf -X POST "$url/api/channel/$id/close" | jq -e '.closed == true'
-          wait $sse
-          cat responses.txt
-
-          grep -q 'echoed\\":{\\"message\\":\\"one' responses.txt
-          grep -q 'echoed\\":{\\"message\\":\\"two' responses.txt
-          grep -q '^event: done' responses.txt
+      - name: Through the real host
+        run: bash scripts/e2e.sh ${{ matrix.transport }} target/release/examples/echo

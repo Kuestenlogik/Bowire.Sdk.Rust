@@ -1,6 +1,7 @@
 //! Echo — minimal Bowire sidecar plugin. Parrots whatever the
 //! workbench POSTs against `DemoService.Echo` back inside an
-//! `{"echoed": <input>}` envelope, and does the same per frame over the
+//! `{"echoed": <input>}` envelope, streams it back three times from the
+//! server-streaming `DemoService.Count`, and echoes every frame over the
 //! duplex `DemoService.Chat` channel. Run with
 //!
 //! ```text
@@ -9,6 +10,18 @@
 //!
 //! …then ship next to `sidecar.json` and install via
 //! `bowire plugin install --file <zip>`.
+//!
+//! Over HTTP/SSE instead of stdio, the sidecar runs on its own and the
+//! manifest points the host at it (`"transport": "http"`, `"url"`):
+//!
+//! ```text
+//! cargo run --features http --example echo -- --http 127.0.0.1:0
+//! ```
+//!
+//! It prints `listening on http://<addr>/` once it accepts connections,
+//! with the port the OS picked for `:0`.
+
+use futures::stream::{self, BoxStream};
 
 use bowire_plugin::{
     run, BowirePlugin, Channel, ChannelHandler, ChannelRequest, DiscoverRequest, FieldInfo,
@@ -63,6 +76,10 @@ impl BowirePlugin for Echo {
                 .with_label("Echo")
                 .with_target("DemoService", "Echo")
                 .with_body_example(r#"{"message":"hello"}"#),
+            ManualCallKind::new("count", "ServerStreaming")
+                .with_label("Count")
+                .with_target("DemoService", "Count")
+                .with_body_example(r#"{"message":"hello"}"#),
             ManualCallKind::new("chat", "Duplex")
                 .with_label("Chat")
                 .with_target("DemoService", "Chat")
@@ -84,12 +101,17 @@ impl BowirePlugin for Echo {
             .with_output(reply.clone())
             .with_summary("Echo the request payload back.");
 
+        let count = MethodInfo::server_streaming("Count")
+            .with_input(request.clone())
+            .with_output(reply.clone())
+            .with_summary("Stream the request payload back three times.");
+
         let chat = MethodInfo::duplex("Chat")
             .with_input(request)
             .with_output(reply)
             .with_summary("Echo every frame back over one open channel.");
 
-        vec![ServiceInfo::new("DemoService").with_methods([echo, chat])]
+        vec![ServiceInfo::new("DemoService").with_methods([echo, count, chat])]
     }
 
     async fn invoke(&self, request: InvokeRequest) -> InvokeResult {
@@ -103,6 +125,18 @@ impl BowirePlugin for Echo {
         // would route this through the underlying wire (HTTP, Zenoh, &c).
         let echoed = transform(&payload, &request.settings);
         InvokeResult::ok(format!(r#"{{"echoed":{echoed}}}"#))
+    }
+
+    async fn invoke_stream(&self, request: InvokeRequest) -> BoxStream<'static, String> {
+        let payload = request
+            .json_messages
+            .first()
+            .cloned()
+            .unwrap_or_else(|| "{}".into());
+        let echoed = transform(&payload, &request.settings);
+        Box::pin(stream::iter(
+            (1..=3).map(move |n| format!(r#"{{"n":{n},"echoed":{echoed}}}"#)),
+        ))
     }
 
     fn channels(&self) -> Option<&dyn ChannelHandler> {
@@ -138,5 +172,46 @@ impl ChannelHandler for Echo {
 
 #[tokio::main]
 async fn main() {
-    std::process::exit(run(Echo).await);
+    let args: Vec<String> = std::env::args().skip(1).collect();
+    match args.as_slice() {
+        [] => std::process::exit(run(Echo).await),
+        [flag, addr] if flag == "--http" => std::process::exit(serve(addr).await),
+        _ => {
+            eprintln!("usage: echo [--http <host:port>]");
+            std::process::exit(2);
+        }
+    }
+}
+
+/// Serve over HTTP/SSE on `addr`. The line on stdout is the signal that
+/// the sidecar accepts connections, and says which port `:0` became.
+#[cfg(feature = "http")]
+async fn serve(addr: &str) -> i32 {
+    let listener = match tokio::net::TcpListener::bind(addr).await {
+        Ok(listener) => listener,
+        Err(e) => {
+            eprintln!("echo: cannot listen on {addr}: {e}");
+            return 1;
+        }
+    };
+    match listener.local_addr() {
+        Ok(bound) => println!("listening on http://{bound}/"),
+        Err(e) => {
+            eprintln!("echo: {e}");
+            return 1;
+        }
+    }
+    match bowire_plugin::serve_http(Echo, listener, bowire_plugin::shutdown_signal()).await {
+        Ok(()) => 0,
+        Err(e) => {
+            eprintln!("echo: {e}");
+            1
+        }
+    }
+}
+
+#[cfg(not(feature = "http"))]
+async fn serve(_addr: &str) -> i32 {
+    eprintln!("echo: built without the http feature; use cargo build --features http");
+    2
 }
