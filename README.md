@@ -268,7 +268,7 @@ ChannelHandler
 
 Pre-1.0, changes land in one cut.
 
-Since 0.2.0:
+In 0.3.0:
 
 - `invoke_stream` moved from `BowirePlugin` to a `StreamHandler` trait,
   which a plugin returns from `streams()`, the way it returns a
