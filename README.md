@@ -119,6 +119,25 @@ fn manual_entry(&self) -> Option<ManualEntryForm> {
   Examples are an unknown method type, a placeholder no field declares, and a
   `select` without options. `manual_entry_problems(&form)` runs the same check.
 
+## Server streams
+
+A plugin that serves server-streaming methods implements `StreamHandler` and returns itself from `streams()`. Every item of the stream goes to the host as one message, and the stream ending ends the call. The handshake then reports `capabilities.invokeStream: true`. Without a handler it reports `false`, so the host does not offer server-streaming calls, and an `invokeStream` that arrives anyway is refused.
+
+```rust
+use bowire_plugin::{InvokeRequest, StreamHandler};
+use futures::stream::{self, BoxStream};
+
+#[async_trait::async_trait]
+impl StreamHandler for MyPlugin {
+    async fn invoke_stream(&self, request: InvokeRequest) -> BoxStream<'static, String> {
+        Box::pin(stream::iter((1..=3).map(|n| format!(r#"{{"n":{n}}}"#))))
+    }
+}
+
+// in impl BowirePlugin for MyPlugin:
+fn streams(&self) -> Option<&dyn StreamHandler> { Some(self) }
+```
+
 ## Duplex channels
 
 A plugin that serves duplex methods implements `ChannelHandler` and returns itself from `channels()`. The handshake then reports `capabilities.channels: true`; without a handler it reports `false` and the host never sends `openChannel`.
@@ -232,11 +251,14 @@ BowirePlugin
 ├── icon_svg() -> &str                                    // default: "<svg/>"
 ├── async discover(DiscoverRequest)                       // required
 ├── async invoke(InvokeRequest) -> InvokeResult           // required
-├── async invoke_stream(InvokeRequest) -> BoxStream       // default: NotImplemented
+├── streams() -> Option<&dyn StreamHandler>               // default: None (no server streams)
 ├── channels() -> Option<&dyn ChannelHandler>             // default: None (no duplex)
 ├── settings() -> Vec<PluginSetting>                      // default: []
 ├── manual_entry() -> Option<ManualEntryForm>             // default: None
 └── capabilities() -> Capabilities                        // default: derived
+
+StreamHandler
+└── async invoke_stream(InvokeRequest) -> BoxStream<String>
 
 ChannelHandler
 └── async open_channel(request, channel) -> Result<(), String>
@@ -244,7 +266,21 @@ ChannelHandler
 
 ## Breaking changes
 
-Pre-1.0, changes land in one cut. Since 0.2.0:
+Pre-1.0, changes land in one cut.
+
+Since 0.2.0:
+
+- `invoke_stream` moved from `BowirePlugin` to a `StreamHandler` trait,
+  which a plugin returns from `streams()`, the way it returns a
+  `ChannelHandler` from `channels()` (#13). The old default emitted one
+  error frame, and `capabilities.invokeStream` said `true` for every plugin,
+  so the host offered streaming calls that could only fail. A plugin that
+  streams implements `StreamHandler` and returns `Some(self)` from
+  `streams()`. `Capabilities::default()` now says `invoke_stream: false`.
+- `serve_http(plugin, listener, shutdown)` and `shutdown_signal()` are new,
+  and `run_http` stops on SIGTERM as well as Ctrl-C (not breaking).
+
+In 0.2.0:
 
 - `discover`, `invoke` and `invoke_stream` take one request value,
   `DiscoverRequest` or `InvokeRequest`, instead of positional arguments.

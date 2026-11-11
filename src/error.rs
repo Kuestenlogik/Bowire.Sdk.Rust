@@ -24,8 +24,7 @@ pub enum Error {
     #[error("malformed json-rpc envelope: {0}")]
     BadEnvelope(String),
 
-    /// The host called a method this plugin doesn't implement —
-    /// usually `invoke_stream` left at default.
+    /// The host called a method this plugin doesn't implement.
     #[error("method not implemented: {0}")]
     NotImplemented(&'static str),
 }

@@ -26,7 +26,7 @@ use futures::stream::{self, BoxStream};
 use bowire_plugin::{
     run, BowirePlugin, Channel, ChannelHandler, ChannelRequest, DiscoverRequest, FieldInfo,
     InvokeRequest, InvokeResult, ManualCallKind, ManualEntryForm, MessageInfo, MethodInfo,
-    PluginSetting, ServiceInfo, SettingOption, Settings,
+    PluginSetting, ServiceInfo, SettingOption, Settings, StreamHandler,
 };
 
 /// What Echo and Chat do to the payload before sending it back: a select
@@ -127,6 +127,17 @@ impl BowirePlugin for Echo {
         InvokeResult::ok(format!(r#"{{"echoed":{echoed}}}"#))
     }
 
+    fn streams(&self) -> Option<&dyn StreamHandler> {
+        Some(self)
+    }
+
+    fn channels(&self) -> Option<&dyn ChannelHandler> {
+        Some(self)
+    }
+}
+
+#[async_trait::async_trait]
+impl StreamHandler for Echo {
     async fn invoke_stream(&self, request: InvokeRequest) -> BoxStream<'static, String> {
         let payload = request
             .json_messages
@@ -137,10 +148,6 @@ impl BowirePlugin for Echo {
         Box::pin(stream::iter(
             (1..=3).map(move |n| format!(r#"{{"n":{n},"echoed":{echoed}}}"#)),
         ))
-    }
-
-    fn channels(&self) -> Option<&dyn ChannelHandler> {
-        Some(self)
     }
 }
 

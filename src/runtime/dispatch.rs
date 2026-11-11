@@ -163,6 +163,13 @@ pub(crate) async fn dispatch<P: BowirePlugin>(
             })
         }
         "invokeStream" => {
+            let Some(handler) = plugin.streams() else {
+                return DispatchResult::Reply(Response::err(
+                    id,
+                    -32601,
+                    format!("plugin '{}' does not serve server streams", plugin.id()),
+                ));
+            };
             // Server-streaming hand-off: build the ack + grab the
             // stream now (so the plugin's `invoke_stream` future
             // resolves before the runtime starts pumping), but
@@ -175,7 +182,7 @@ pub(crate) async fn dispatch<P: BowirePlugin>(
             let show_internal = bool_param(&params, "showInternalServices").unwrap_or(false);
             let metadata = map_param(&params, "metadata");
 
-            let stream = plugin
+            let stream = handler
                 .invoke_stream(InvokeRequest {
                     server_url,
                     service,
@@ -232,9 +239,10 @@ fn call_settings<P: BowirePlugin + ?Sized>(plugin: &P, params: &Value) -> Settin
 }
 
 /// What goes into the handshake: the plugin's own report, except that
-/// `channels` cannot be claimed without a handler to route it to.
+/// streams and channels cannot be claimed without a handler to route them to.
 fn capabilities<P: BowirePlugin>(plugin: &P) -> crate::plugin::Capabilities {
     let mut caps = plugin.capabilities();
+    caps.invoke_stream &= plugin.streams().is_some();
     caps.channels &= plugin.channels().is_some();
     caps
 }
@@ -399,10 +407,68 @@ mod tests {
             json!({
                 "discover": true,
                 "invoke": true,
-                "invokeStream": true,
+                "invokeStream": false,
                 "channels": false,
             })
         );
+    }
+
+    /// #13: a plugin without a stream handler used to claim streaming and
+    /// answer with one not-implemented frame. It now says it cannot, and
+    /// an `invokeStream` that arrives anyway is refused.
+    #[tokio::test]
+    async fn without_a_stream_handler_invoke_stream_is_refused() {
+        let outcome = dispatch(Arc::new(Fake), request("invokeStream"), &session()).await;
+        let DispatchResult::Reply(reply) = outcome else {
+            panic!("expected a refusal, not a stream");
+        };
+        let error = reply.error.expect("an error reply");
+        assert_eq!(error.code, -32601);
+        assert!(
+            error.message.contains("does not serve server streams"),
+            "{}",
+            error.message
+        );
+    }
+
+    struct Streams;
+
+    #[async_trait]
+    impl BowirePlugin for Streams {
+        fn id(&self) -> &str {
+            "streams"
+        }
+        fn name(&self) -> &str {
+            "Streams"
+        }
+        async fn discover(&self, _request: DiscoverRequest) -> Vec<ServiceInfo> {
+            vec![]
+        }
+        async fn invoke(&self, _request: InvokeRequest) -> InvokeResult {
+            InvokeResult::default()
+        }
+        fn streams(&self) -> Option<&dyn crate::StreamHandler> {
+            Some(self)
+        }
+    }
+
+    #[async_trait]
+    impl crate::StreamHandler for Streams {
+        async fn invoke_stream(
+            &self,
+            _request: InvokeRequest,
+        ) -> futures::stream::BoxStream<'static, String> {
+            Box::pin(futures::stream::iter(["1".to_string()]))
+        }
+    }
+
+    #[tokio::test]
+    async fn a_stream_handler_is_reported_and_routed() {
+        let init = result_of(dispatch(Arc::new(Streams), request("initialize"), &session()).await);
+        assert_eq!(init["capabilities"]["invokeStream"], json!(true));
+
+        let outcome = dispatch(Arc::new(Streams), request("invokeStream"), &session()).await;
+        assert!(matches!(outcome, DispatchResult::Stream { .. }));
     }
 
     /// The host reads a non-array discover result as "no services, try the

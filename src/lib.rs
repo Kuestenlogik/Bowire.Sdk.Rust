@@ -52,6 +52,13 @@
 //!   Fits hosted / multi-tenant deployments where one sidecar serves
 //!   many Bowire workbenches.
 //!
+//! ## Server streams
+//!
+//! Implement [`StreamHandler`] and return `Some(self)` from
+//! [`BowirePlugin::streams`]; the handshake then reports
+//! `capabilities.invokeStream: true` and the runtime routes `invokeStream`
+//! to it. Without one, the host does not offer server-streaming calls.
+//!
 //! ## Duplex channels
 //!
 //! Implement [`ChannelHandler`] and return `Some(self)` from
@@ -70,6 +77,7 @@ mod models;
 mod plugin;
 mod runtime;
 mod settings;
+mod stream;
 
 pub use channel::{Channel, ChannelHandler, ChannelReceiver, ChannelRequest, ChannelSender};
 pub use error::{Error, Result};
@@ -80,6 +88,7 @@ pub use models::{
 };
 pub use plugin::{BowirePlugin, Capabilities, DiscoverRequest, InvokeRequest};
 pub use settings::Settings;
+pub use stream::StreamHandler;
 
 /// The sidecar wire-contract version this SDK speaks (#416). The host
 /// accepts a sidecar inside its supported range and refuses one outside it

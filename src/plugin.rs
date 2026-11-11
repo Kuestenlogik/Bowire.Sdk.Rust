@@ -1,21 +1,21 @@
 //! The plugin trait users implement. Only [`BowirePlugin::id`],
 //! [`BowirePlugin::name`], [`BowirePlugin::discover`] and
-//! [`BowirePlugin::invoke`] are mandatory — the streaming / channel /
-//! settings hooks ship with defaults: a not-implemented stream frame, no
-//! channels, no settings. Each call arrives as one request value
+//! [`BowirePlugin::invoke`] are mandatory — the stream / channel /
+//! settings hooks ship with defaults: no server streams, no channels, no
+//! settings. Each call arrives as one request value
 //! ([`DiscoverRequest`], [`InvokeRequest`], [`crate::ChannelRequest`]) that
 //! carries the values behind the declared settings as [`Settings`].
 
 use std::collections::HashMap;
 
 use async_trait::async_trait;
-use futures::stream::{self, BoxStream};
 use serde::{Deserialize, Serialize};
 
 use crate::channel::ChannelHandler;
 use crate::manual_entry::ManualEntryForm;
 use crate::models::{InvokeResult, PluginSetting, ServiceInfo};
 use crate::settings::Settings;
+use crate::stream::StreamHandler;
 
 /// One Bowire protocol-plugin instance. The runtime ([`crate::run`] /
 /// [`crate::run_http`]) owns the wire; you own this trait's bodies.
@@ -51,15 +51,16 @@ pub trait BowirePlugin: Send + Sync + 'static {
     /// the workbench should render.
     async fn invoke(&self, request: InvokeRequest) -> InvokeResult;
 
-    /// Dispatch a server-streaming or duplex call. Default emits a
-    /// single not-implemented frame so the workbench fails fast
-    /// instead of hanging.
-    async fn invoke_stream(&self, _request: InvokeRequest) -> BoxStream<'static, String> {
-        let msg = format!(
-            r#"{{"status":"Error","response":"invoke_stream not implemented by plugin '{}'"}}"#,
-            self.id()
-        );
-        Box::pin(stream::iter([msg]))
+    /// The server-stream handler, when this plugin serves server-streaming
+    /// methods. Default `None`: no streams, and the handshake says so
+    /// (`capabilities.invokeStream: false`), so the host does not offer
+    /// them.
+    ///
+    /// Implement [`StreamHandler`] and return `Some(self)` to serve them;
+    /// the runtime then routes `invokeStream` and reports
+    /// `invokeStream: true`.
+    fn streams(&self) -> Option<&dyn StreamHandler> {
+        None
     }
 
     /// The duplex-channel handler, when this plugin serves duplex methods.
@@ -99,17 +100,17 @@ pub trait BowirePlugin: Send + Sync + 'static {
     /// without a round-trip.
     ///
     /// The default says yes to discover and invoke (both are required
-    /// trait methods, so an implementation exists by definition) and to
-    /// `invoke_stream`, whose default emits one not-implemented frame
-    /// the workbench renders as an error. `channels` follows
-    /// [`BowirePlugin::channels`]: yes exactly when a handler is there.
+    /// trait methods, so an implementation exists by definition).
+    /// `invoke_stream` follows [`BowirePlugin::streams`] and `channels`
+    /// follows [`BowirePlugin::channels`]: yes exactly when a handler is
+    /// there.
     ///
-    /// Override it when your plugin knows better — a plugin that does
-    /// not stream should say `invoke_stream: false` rather than hand the
-    /// operator an error frame. `channels: true` without a handler is
-    /// reported as `false`: there would be nothing to route the call to.
+    /// Override it when your plugin knows better. `invoke_stream` or
+    /// `channels` set to `true` without a handler is reported as `false`:
+    /// there would be nothing to route the call to.
     fn capabilities(&self) -> Capabilities {
         Capabilities {
+            invoke_stream: self.streams().is_some(),
             channels: self.channels().is_some(),
             ..Capabilities::default()
         }
@@ -127,20 +128,20 @@ pub struct Capabilities {
     pub discover: bool,
     /// Can answer `invoke`.
     pub invoke: bool,
-    /// Can answer `invokeStream`.
+    /// Can answer `invokeStream` — see [`BowirePlugin::streams`].
     pub invoke_stream: bool,
     /// Can answer `openChannel` — see [`BowirePlugin::channels`].
     pub channels: bool,
 }
 
-/// Everything but channels: those need a [`ChannelHandler`], which a
-/// bare default cannot know about.
+/// Discover and invoke. Streams and channels need a [`StreamHandler`] or a
+/// [`ChannelHandler`], which a bare default cannot know about.
 impl Default for Capabilities {
     fn default() -> Self {
         Self {
             discover: true,
             invoke: true,
-            invoke_stream: true,
+            invoke_stream: false,
             channels: false,
         }
     }

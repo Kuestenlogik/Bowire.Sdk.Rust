@@ -295,6 +295,13 @@ mod tests {
         async fn invoke(&self, _: InvokeRequest) -> InvokeResult {
             InvokeResult::ok("{}")
         }
+        fn streams(&self) -> Option<&dyn crate::StreamHandler> {
+            Some(self)
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl crate::StreamHandler for Ticker {
         async fn invoke_stream(&self, _: InvokeRequest) -> BoxStream<'static, String> {
             Box::pin(stream::iter(["1", "2"].map(String::from)))
         }
