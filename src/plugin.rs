@@ -1,8 +1,8 @@
 //! The plugin trait users implement. Only [`BowirePlugin::id`],
 //! [`BowirePlugin::name`], [`BowirePlugin::discover`] and
 //! [`BowirePlugin::invoke`] are mandatory — the stream / channel /
-//! settings hooks ship with defaults: no server streams, no channels, no
-//! settings. Each call arrives as one request value
+//! settings / shutdown hooks ship with defaults: no server streams, no
+//! channels, no settings, nothing to release. Each call arrives as one request value
 //! ([`DiscoverRequest`], [`InvokeRequest`], [`crate::ChannelRequest`]) that
 //! carries the values behind the declared settings as [`Settings`].
 
@@ -115,6 +115,17 @@ pub trait BowirePlugin: Send + Sync + 'static {
             ..Capabilities::default()
         }
     }
+
+    /// Called once, when the sidecar itself stops, after every open channel
+    /// has closed: release what the plugin holds (connections, files).
+    /// Default: nothing to release.
+    ///
+    /// Over stdio that is the host's `shutdown` request, or stdin closing.
+    /// Over http it is the server stopping ([`crate::serve_http`]'s
+    /// `shutdown` future completing), never a host's `shutdown` request:
+    /// that only ends the host's own session, and the sidecar keeps serving
+    /// the others.
+    async fn shutdown(&self) {}
 }
 
 /// Capability flags a sidecar advertises in its `initialize` reply

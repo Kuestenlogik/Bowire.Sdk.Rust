@@ -7,10 +7,12 @@
 //! `channel.send` / `channel.close` belongs to).
 
 use std::collections::HashMap;
+use std::future::Future;
 use std::sync::Arc;
 
 use futures::stream::BoxStream;
 use serde_json::{json, Value};
+use tokio::sync::watch;
 
 use crate::channel::{ChannelRefusal, ChannelRegistry, ChannelRequest, Notify};
 use crate::plugin::{BowirePlugin, DiscoverRequest, InvokeRequest};
@@ -22,11 +24,15 @@ use crate::settings::{settings_problems, Settings};
 /// `SendAsync` → `false`; the code just tells a log reader which case.
 pub(crate) const CHANNEL_CLOSED: i32 = -32001;
 
-/// Per-connection state the dispatcher needs beyond the plugin: the open
-/// channels and the queue server-initiated notifications go out on.
+/// What one host holds on this sidecar: its open channels, its running
+/// streams, and the queue its notifications go out on. Over stdio there is
+/// one, for the pipe; over http one per `Bowire-Session` id.
 pub(crate) struct Session {
     pub(crate) channels: ChannelRegistry,
     pub(crate) notify: Notify,
+    /// Counts the times this session ended. A stream pump watches it and
+    /// stops at the next change.
+    ends: watch::Sender<u64>,
 }
 
 impl Session {
@@ -34,8 +40,35 @@ impl Session {
         Self {
             channels: ChannelRegistry::default(),
             notify,
+            ends: watch::Sender::new(0),
         }
     }
+
+    /// The host is gone: stop its streams and close its channels. What is
+    /// opened afterwards is not affected, and a second call finds nothing
+    /// left to end.
+    pub(crate) fn end(&self) {
+        self.ends.send_modify(|ends| *ends += 1);
+        self.channels.close_all(&self.notify);
+    }
+
+    /// Completes when the session ends next, counted from this call. Take it
+    /// before starting the work it should stop, so an end in between is not
+    /// missed.
+    pub(crate) fn ended(&self) -> impl Future<Output = ()> + Send + 'static {
+        let mut ends = self.ends.subscribe();
+        async move {
+            // An error means the session itself is gone, which ends it too.
+            let _ = ends.changed().await;
+        }
+    }
+}
+
+/// Whether `method` starts something its session then owns. Every other
+/// method only reads what is already there.
+#[cfg(feature = "http")]
+pub(crate) fn starts_owned_work(method: &str) -> bool {
+    matches!(method, "invokeStream" | "openChannel")
 }
 
 /// One method-dispatch outcome the runtime then has to act on.
@@ -54,8 +87,9 @@ pub(crate) enum DispatchResult {
         stream: BoxStream<'static, String>,
     },
 
-    /// Host requested shutdown — ack first, then signal the runtime
-    /// to terminate its read loop.
+    /// The host sent `shutdown`. What that ends is the transport's to
+    /// decide: the process over stdio, the caller's session over http. The
+    /// reply goes out once that is done.
     Shutdown(Response),
 }
 

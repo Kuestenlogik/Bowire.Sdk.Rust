@@ -140,7 +140,7 @@ impl ChannelSender {
 
     /// See [`Channel::close`].
     pub fn close(&self) {
-        self.inner.entry.close_from_plugin(&self.inner.notify);
+        self.inner.entry.close(&self.inner.notify);
     }
 }
 
@@ -159,7 +159,7 @@ impl std::fmt::Debug for SenderInner {
 
 impl Drop for SenderInner {
     fn drop(&mut self) {
-        self.entry.close_from_plugin(&self.notify);
+        self.entry.close(&self.notify);
     }
 }
 
@@ -217,7 +217,10 @@ impl Entry {
         }
     }
 
-    fn close_from_plugin(&self, notify: &Notify) {
+    /// Close the channel, whoever asks: the plugin, its last handle going
+    /// away, or the runtime ending the session that owns it. The plugin's
+    /// [`Channel::recv`] ends and `$/channel/closed` goes out, once.
+    fn close(&self, notify: &Notify) {
         let mut state = self.lock();
         state.inbound = None;
         match state.phase {
@@ -331,7 +334,19 @@ impl ChannelRegistry {
         Ok(())
     }
 
-    #[cfg(test)]
+    /// Close every channel: the host that owns them is gone, or the runtime
+    /// is stopping. Each plugin sees its [`Channel::recv`] end and the host's
+    /// read stream gets its `$/channel/closed`. Finds nothing to do the
+    /// second time.
+    pub(crate) fn close_all(&self, notify: &Notify) {
+        // Out of the map first: closing an entry takes the map lock itself.
+        let open: Vec<Arc<Entry>> = self.map().values().cloned().collect();
+        for entry in open {
+            entry.close(notify);
+        }
+    }
+
+    #[cfg(any(test, feature = "http"))]
     pub(crate) fn len(&self) -> usize {
         self.map().len()
     }

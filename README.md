@@ -242,6 +242,43 @@ println!("listening on http://{}/", listener.local_addr()?);
 bowire_plugin::serve_http(MyPlugin::default(), listener, bowire_plugin::shutdown_signal()).await
 ```
 
+### Sessions over HTTP
+
+One http sidecar serves several hosts at once. Each host names itself with a
+session id in the `Bowire-Session` request header, on every POST and on its
+SSE `GET`. The runtime keeps the hosts apart by it. Your plugin code does not
+see sessions.
+
+- A stream or channel belongs to the session of the request that started it.
+  Its frames go to that session's SSE streams only.
+- A session ends when its host sends `shutdown`, or when its last SSE stream
+  closes. The second covers a host that crashed. The runtime then closes the
+  session's channels, so `channel.recv()` returns `None`, and drops its
+  streams. Every other session keeps running.
+- `channel.send` and `channel.close` reach only a channel of the caller's own
+  session. Any other id gets the "channel is closed" error.
+- Requests without the header share one unnamed session. Their frames go to
+  every SSE stream that sent no header either. A `shutdown` without the header
+  is acknowledged and ends nothing.
+
+## Shutdown
+
+Override `shutdown()` to release what the plugin holds. It runs once, when the
+sidecar itself stops, after every open channel has closed:
+
+```rust
+async fn shutdown(&self) {
+    self.pool.close().await;
+}
+```
+
+- **stdio:** the host owns the process. On its `shutdown` request the runtime
+  stops the running streams, closes the channels, runs the hook, replies, and
+  `run` returns. Stdin closing without a `shutdown` runs the hook too.
+- **HTTP:** the hook runs when the server stops (Ctrl-C, SIGTERM, or the future
+  you gave `serve_http`). A host's `shutdown` request never runs it: that host
+  is leaving, and the sidecar stays for the others.
+
 ## Trait surface
 
 ```text
@@ -255,7 +292,8 @@ BowirePlugin
 ├── channels() -> Option<&dyn ChannelHandler>             // default: None (no duplex)
 ├── settings() -> Vec<PluginSetting>                      // default: []
 ├── manual_entry() -> Option<ManualEntryForm>             // default: None
-└── capabilities() -> Capabilities                        // default: derived
+├── capabilities() -> Capabilities                        // default: derived
+└── async shutdown()                                      // default: nothing to release
 
 StreamHandler
 └── async invoke_stream(InvokeRequest) -> BoxStream<String>
@@ -267,6 +305,21 @@ ChannelHandler
 ## Breaking changes
 
 Pre-1.0, changes land in one cut.
+
+Unreleased:
+
+- HTTP: hosts are kept apart by the `Bowire-Session` request header
+  (Kuestenlogik/Bowire#1014). A stream or channel belongs to the session that
+  started it, and its frames go to that session's SSE streams only. They used
+  to go to every connected host. See [Sessions over HTTP](#sessions-over-http).
+- HTTP: a host's `shutdown`, or its last SSE stream closing, ends that
+  session's streams and channels. `shutdown` used to be acknowledged and
+  nothing else, so streams and channels outlived every host.
+- `BowirePlugin::shutdown()` is new: a hook that runs once when the sidecar
+  itself stops (not breaking; the default does nothing).
+- stdio: `run` returns on the host's `shutdown` request, after it closed the
+  channels, ran the hook and replied. It used to reply and then wait for stdin
+  to close. Stdin closing now closes the open channels as well.
 
 In 0.3.0:
 

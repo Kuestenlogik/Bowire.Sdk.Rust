@@ -50,7 +50,16 @@
 //!   server that POSTs receive JSON-RPC requests on a configurable path
 //!   and a long-lived SSE GET drains server-initiated notifications.
 //!   Fits hosted / multi-tenant deployments where one sidecar serves
-//!   many Bowire workbenches.
+//!   many Bowire workbenches. Each host names itself with the
+//!   `Bowire-Session` request header; the streams and channels it opens are
+//!   its own, and end with it when it leaves.
+//!
+//! ## Shutdown
+//!
+//! [`BowirePlugin::shutdown`] runs once, when the sidecar itself stops:
+//! on the host's `shutdown` request over stdio, when the server stops over
+//! HTTP. A host leaving an HTTP sidecar ends its own session and nothing
+//! else.
 //!
 //! ## Server streams
 //!

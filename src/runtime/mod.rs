@@ -20,6 +20,8 @@ pub mod http;
 
 mod dispatch;
 pub(crate) mod jsonrpc;
+#[cfg(feature = "http")]
+mod sessions;
 
 #[cfg(test)]
 mod channel_tests;
